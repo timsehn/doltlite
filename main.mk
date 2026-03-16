@@ -558,6 +558,21 @@ LIBOBJS0 = alter.o analyze.o attach.o auth.o \
          vdbetrace.o vdbevtab.o vtab.o \
          wal.o walker.o where.o wherecode.o whereexpr.o \
          window.o
+#
+# Prolly tree engine objects (when DOLTITE_PROLLY=1)
+#
+PROLLY_OBJS = prolly_hash.o prolly_arena.o prolly_node.o prolly_cache.o \
+              chunk_store.o prolly_cursor.o prolly_mutmap.o prolly_chunker.o \
+              prolly_mutate.o prolly_diff.o prolly_btree.o pager_shim.o
+
+DOLTITE_PROLLY ?= 0
+ifeq ($(DOLTITE_PROLLY),1)
+  # Replace btree.o/pager.o/wal.o with prolly engine
+  LIBOBJS0 := $(filter-out btree.o pager.o wal.o,$(LIBOBJS0))
+  LIBOBJS0 += $(PROLLY_OBJS)
+  OPT_FEATURE_FLAGS += -DDOLTITE_PROLLY=1
+endif
+
 LIBOBJS = $(LIBOBJS0)
 
 #
@@ -682,6 +697,32 @@ SRC = \
   $(TOP)/src/whereexpr.c \
   $(TOP)/src/whereInt.h \
   $(TOP)/src/window.c
+
+# Prolly tree engine source files
+SRC += \
+  $(TOP)/src/prolly_hash.c \
+  $(TOP)/src/prolly_hash.h \
+  $(TOP)/src/prolly_arena.c \
+  $(TOP)/src/prolly_arena.h \
+  $(TOP)/src/prolly_node.c \
+  $(TOP)/src/prolly_node.h \
+  $(TOP)/src/prolly_cache.c \
+  $(TOP)/src/prolly_cache.h \
+  $(TOP)/src/chunk_store.c \
+  $(TOP)/src/chunk_store.h \
+  $(TOP)/src/prolly_cursor.c \
+  $(TOP)/src/prolly_cursor.h \
+  $(TOP)/src/prolly_mutmap.c \
+  $(TOP)/src/prolly_mutmap.h \
+  $(TOP)/src/prolly_chunker.c \
+  $(TOP)/src/prolly_chunker.h \
+  $(TOP)/src/prolly_mutate.c \
+  $(TOP)/src/prolly_mutate.h \
+  $(TOP)/src/prolly_diff.c \
+  $(TOP)/src/prolly_diff.h \
+  $(TOP)/src/prolly_btree.c \
+  $(TOP)/src/pager_shim.c \
+  $(TOP)/src/pager_shim.h
 
 # Source code for extensions
 #
@@ -907,6 +948,19 @@ HDR = \
    $(TOP)/src/vxworks.h \
    $(TOP)/src/whereInt.h \
    sqlite_cfg.h
+# Prolly tree engine headers
+HDR += \
+   $(TOP)/src/prolly_hash.h \
+   $(TOP)/src/prolly_arena.h \
+   $(TOP)/src/prolly_node.h \
+   $(TOP)/src/prolly_cache.h \
+   $(TOP)/src/chunk_store.h \
+   $(TOP)/src/prolly_cursor.h \
+   $(TOP)/src/prolly_mutmap.h \
+   $(TOP)/src/prolly_chunker.h \
+   $(TOP)/src/prolly_mutate.h \
+   $(TOP)/src/prolly_diff.h \
+   $(TOP)/src/pager_shim.h
 # Reminder: sqlite_cfg.h is typically created by the configure script
 
 # Header files used by extensions
@@ -1197,6 +1251,43 @@ btmutex.o:	$(TOP)/src/btmutex.c $(DEPS_OBJ_COMMON)
 
 btree.o:	$(TOP)/src/btree.c $(DEPS_OBJ_COMMON) $(TOP)/src/pager.h
 	$(T.cc.sqlite) -c $(TOP)/src/btree.c
+
+# Prolly tree engine compilation rules
+prolly_hash.o:	$(TOP)/src/prolly_hash.c $(DEPS_OBJ_COMMON)
+	$(T.cc.sqlite) -c $(TOP)/src/prolly_hash.c
+
+prolly_arena.o:	$(TOP)/src/prolly_arena.c $(DEPS_OBJ_COMMON)
+	$(T.cc.sqlite) -c $(TOP)/src/prolly_arena.c
+
+prolly_node.o:	$(TOP)/src/prolly_node.c $(DEPS_OBJ_COMMON)
+	$(T.cc.sqlite) -c $(TOP)/src/prolly_node.c
+
+prolly_cache.o:	$(TOP)/src/prolly_cache.c $(DEPS_OBJ_COMMON)
+	$(T.cc.sqlite) -c $(TOP)/src/prolly_cache.c
+
+chunk_store.o:	$(TOP)/src/chunk_store.c $(DEPS_OBJ_COMMON)
+	$(T.cc.sqlite) -c $(TOP)/src/chunk_store.c
+
+prolly_cursor.o:	$(TOP)/src/prolly_cursor.c $(DEPS_OBJ_COMMON)
+	$(T.cc.sqlite) -c $(TOP)/src/prolly_cursor.c
+
+prolly_mutmap.o:	$(TOP)/src/prolly_mutmap.c $(DEPS_OBJ_COMMON)
+	$(T.cc.sqlite) -c $(TOP)/src/prolly_mutmap.c
+
+prolly_chunker.o:	$(TOP)/src/prolly_chunker.c $(DEPS_OBJ_COMMON)
+	$(T.cc.sqlite) -c $(TOP)/src/prolly_chunker.c
+
+prolly_mutate.o:	$(TOP)/src/prolly_mutate.c $(DEPS_OBJ_COMMON)
+	$(T.cc.sqlite) -c $(TOP)/src/prolly_mutate.c
+
+prolly_diff.o:	$(TOP)/src/prolly_diff.c $(DEPS_OBJ_COMMON)
+	$(T.cc.sqlite) -c $(TOP)/src/prolly_diff.c
+
+prolly_btree.o:	$(TOP)/src/prolly_btree.c $(DEPS_OBJ_COMMON)
+	$(T.cc.sqlite) -c $(TOP)/src/prolly_btree.c
+
+pager_shim.o:	$(TOP)/src/pager_shim.c $(DEPS_OBJ_COMMON)
+	$(T.cc.sqlite) -c $(TOP)/src/pager_shim.c
 
 build.o:	$(TOP)/src/build.c $(DEPS_OBJ_COMMON)
 	$(T.cc.sqlite) -c $(TOP)/src/build.c
