@@ -118,6 +118,16 @@ static void registerDoltiteFunctions(sqlite3 *db);
 #define BTS_INITIALLY_EMPTY 0x0010  /* Database was empty at open time */
 #define BTS_NO_WAL          0x0020  /* WAL mode is not used */
 
+/* Clear the cached payload, freeing owned copies */
+#define CLEAR_CACHED_PAYLOAD(pCur) do{ \
+  if( (pCur)->cachedPayloadOwned && (pCur)->pCachedPayload ){ \
+    sqlite3_free((pCur)->pCachedPayload); \
+  } \
+  (pCur)->pCachedPayload = 0; \
+  (pCur)->nCachedPayload = 0; \
+  (pCur)->cachedPayloadOwned = 0; \
+}while(0)
+
 /*
 ** BtLock structure.  Not used by prolly trees (no shared cache) but
 ** needed for struct compatibility with code that references Btree.lock.
@@ -1543,11 +1553,7 @@ int sqlite3BtreeCloseCursor(BtCursor *pCur){
     pCur->pMutMap = 0;
   }
 
-  if( pCur->pCachedPayload ){
-    sqlite3_free(pCur->pCachedPayload);
-    pCur->pCachedPayload = 0;
-    pCur->nCachedPayload = 0;
-  }
+  CLEAR_CACHED_PAYLOAD(pCur);
 
   if( pCur->pKey ){
     sqlite3_free(pCur->pKey);
@@ -1609,8 +1615,7 @@ int sqlite3BtreeClosesWithCursor(Btree *p, BtCursor *pCur){
 
 int sqlite3BtreeFirst(BtCursor *pCur, int *pRes){
   int rc;
-  pCur->pCachedPayload = 0;
-  pCur->nCachedPayload = 0;
+  CLEAR_CACHED_PAYLOAD(pCur);
   rc = flushIfNeeded(pCur);
   if( rc!=SQLITE_OK ) return rc;
   refreshCursorRoot(pCur);
@@ -1624,8 +1629,7 @@ int sqlite3BtreeFirst(BtCursor *pCur, int *pRes){
 
 int sqlite3BtreeLast(BtCursor *pCur, int *pRes){
   int rc;
-  pCur->pCachedPayload = 0;
-  pCur->nCachedPayload = 0;
+  CLEAR_CACHED_PAYLOAD(pCur);
   rc = flushIfNeeded(pCur);
   if( rc!=SQLITE_OK ) return rc;
   refreshCursorRoot(pCur);
@@ -1644,8 +1648,7 @@ int sqlite3BtreeLast(BtCursor *pCur, int *pRes){
 int sqlite3BtreeNext(BtCursor *pCur, int flags){
   int rc;
   (void)flags;
-  pCur->pCachedPayload = 0;
-  pCur->nCachedPayload = 0;
+  CLEAR_CACHED_PAYLOAD(pCur);
 
   /* Handle cursors invalidated by delete */
   if( pCur->eState==CURSOR_INVALID ){
@@ -1677,8 +1680,7 @@ int sqlite3BtreeNext(BtCursor *pCur, int flags){
 int sqlite3BtreePrevious(BtCursor *pCur, int flags){
   int rc;
   (void)flags;
-  pCur->pCachedPayload = 0;
-  pCur->nCachedPayload = 0;
+  CLEAR_CACHED_PAYLOAD(pCur);
 
   if( pCur->eState==CURSOR_INVALID ){
     return SQLITE_DONE;
@@ -1755,10 +1757,22 @@ int sqlite3BtreeTableMoveto(
         pCur->eState = CURSOR_VALID;
         pCur->curFlags |= BTCF_ValidNKey;
         pCur->cachedIntKey = intKey;
-        /* Store a borrowed pointer to the MutMap value for PayloadFetch */
-        pCur->pCachedPayload = pEntry->pVal;
-        pCur->nCachedPayload = pEntry->nVal;
-        pCur->cachedPayloadOwned = 0;
+        /* Copy the MutMap value so it's safe after MutMap changes */
+        if( pCur->cachedPayloadOwned && pCur->pCachedPayload ){
+          sqlite3_free(pCur->pCachedPayload);
+        }
+        if( pEntry->nVal > 0 && pEntry->pVal ){
+          pCur->pCachedPayload = sqlite3_malloc(pEntry->nVal);
+          if( pCur->pCachedPayload ){
+            memcpy(pCur->pCachedPayload, pEntry->pVal, pEntry->nVal);
+            pCur->nCachedPayload = pEntry->nVal;
+          } else {
+            pCur->nCachedPayload = 0;
+          }
+        } else {
+          CLEAR_CACHED_PAYLOAD(pCur);
+        }
+        pCur->cachedPayloadOwned = 1;
         return SQLITE_OK;
       } else {
         /* Key is pending DELETE — doesn't exist */
@@ -1791,8 +1805,7 @@ int sqlite3BtreeTableMoveto(
       pCur->eState = CURSOR_VALID;
       pCur->curFlags |= BTCF_ValidNKey;
       pCur->cachedIntKey = intKey;
-      pCur->pCachedPayload = 0;
-      pCur->nCachedPayload = 0;
+      CLEAR_CACHED_PAYLOAD(pCur);
       pCur->cachedPayloadOwned = 0;
     } else if( pCur->pCur.eState==PROLLY_CURSOR_VALID ){
       pCur->eState = CURSOR_VALID;
@@ -2280,11 +2293,7 @@ void sqlite3BtreeClearCursor(BtCursor *pCur){
     pCur->pKey = 0;
     pCur->nKey = 0;
   }
-  if( pCur->pCachedPayload ){
-    sqlite3_free(pCur->pCachedPayload);
-    pCur->pCachedPayload = 0;
-    pCur->nCachedPayload = 0;
-  }
+  CLEAR_CACHED_PAYLOAD(pCur);
   pCur->eState = CURSOR_INVALID;
   pCur->curFlags &= ~(BTCF_ValidNKey|BTCF_ValidOvfl|BTCF_AtLast);
   pCur->skipNext = 0;
