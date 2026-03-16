@@ -277,9 +277,10 @@ struct BtCursor {
   /* Pending writes for this table */
   ProllyMutMap *pMutMap;
 
-  /* Cached payload */
+  /* Cached payload — may point to MutMap data (borrowed, not owned) */
   u8 *pCachedPayload;
   int nCachedPayload;
+  u8 cachedPayloadOwned;   /* 1 if pCachedPayload was sqlite3_malloc'd */
   i64 cachedIntKey;
 
   /* Pinned state */
@@ -1489,6 +1490,8 @@ int sqlite3BtreeClosesWithCursor(Btree *p, BtCursor *pCur){
 
 int sqlite3BtreeFirst(BtCursor *pCur, int *pRes){
   int rc;
+  pCur->pCachedPayload = 0;
+  pCur->nCachedPayload = 0;
   rc = flushIfNeeded(pCur);
   if( rc!=SQLITE_OK ) return rc;
   refreshCursorRoot(pCur);
@@ -1502,6 +1505,8 @@ int sqlite3BtreeFirst(BtCursor *pCur, int *pRes){
 
 int sqlite3BtreeLast(BtCursor *pCur, int *pRes){
   int rc;
+  pCur->pCachedPayload = 0;
+  pCur->nCachedPayload = 0;
   rc = flushIfNeeded(pCur);
   if( rc!=SQLITE_OK ) return rc;
   refreshCursorRoot(pCur);
@@ -1520,6 +1525,8 @@ int sqlite3BtreeLast(BtCursor *pCur, int *pRes){
 int sqlite3BtreeNext(BtCursor *pCur, int flags){
   int rc;
   (void)flags;
+  pCur->pCachedPayload = 0;
+  pCur->nCachedPayload = 0;
 
   /* Handle cursors invalidated by delete */
   if( pCur->eState==CURSOR_INVALID ){
@@ -1551,6 +1558,8 @@ int sqlite3BtreeNext(BtCursor *pCur, int flags){
 int sqlite3BtreePrevious(BtCursor *pCur, int flags){
   int rc;
   (void)flags;
+  pCur->pCachedPayload = 0;
+  pCur->nCachedPayload = 0;
 
   if( pCur->eState==CURSOR_INVALID ){
     return SQLITE_DONE;
@@ -1611,8 +1620,50 @@ int sqlite3BtreeTableMoveto(
   pCur->nSeek++;
   if( pCur->pBtree ) pCur->pBtree->nSeek++;
 
-  rc = flushIfNeeded(pCur);
-  if( rc!=SQLITE_OK ) return rc;
+  /*
+  ** Optimization: check the MutMap first before flushing.
+  ** If the key is in the MutMap as an INSERT, it exists — no flush needed.
+  ** If the key is in the MutMap as a DELETE, it doesn't exist.
+  ** If not in MutMap, search the existing tree (also no flush needed).
+  ** Only flush when we have pending edits from OTHER cursors.
+  */
+  if( pCur->pMutMap && !prollyMutMapIsEmpty(pCur->pMutMap) ){
+    ProllyMutMapEntry *pEntry = prollyMutMapFind(pCur->pMutMap, 0, 0, intKey);
+    if( pEntry ){
+      if( pEntry->op == PROLLY_EDIT_INSERT ){
+        /* Key exists in pending inserts — exact match */
+        *pRes = 0;
+        pCur->eState = CURSOR_VALID;
+        pCur->curFlags |= BTCF_ValidNKey;
+        pCur->cachedIntKey = intKey;
+        /* Store a borrowed pointer to the MutMap value for PayloadFetch */
+        pCur->pCachedPayload = pEntry->pVal;
+        pCur->nCachedPayload = pEntry->nVal;
+        pCur->cachedPayloadOwned = 0;
+        return SQLITE_OK;
+      } else {
+        /* Key is pending DELETE — doesn't exist */
+        *pRes = 1;
+        pCur->eState = CURSOR_INVALID;
+        return SQLITE_OK;
+      }
+    }
+    /* Not in MutMap — fall through to check the tree without flushing */
+  }
+
+  /* Flush other cursors' pending mutations on this table */
+  {
+    BtCursor *p;
+    for(p = pCur->pBt->pCursor; p; p = p->pNext){
+      if( p!=pCur && p->pgnoRoot==pCur->pgnoRoot
+       && p->pMutMap && !prollyMutMapIsEmpty(p->pMutMap) ){
+        rc = flushMutMap(p);
+        if( rc!=SQLITE_OK ) return rc;
+        p->eState = CURSOR_INVALID;
+      }
+    }
+  }
+
   refreshCursorRoot(pCur);
 
   rc = prollyCursorSeekInt(&pCur->pCur, intKey, pRes);
@@ -1621,6 +1672,9 @@ int sqlite3BtreeTableMoveto(
       pCur->eState = CURSOR_VALID;
       pCur->curFlags |= BTCF_ValidNKey;
       pCur->cachedIntKey = intKey;
+      pCur->pCachedPayload = 0;
+      pCur->nCachedPayload = 0;
+      pCur->cachedPayloadOwned = 0;
     } else if( pCur->pCur.eState==PROLLY_CURSOR_VALID ){
       pCur->eState = CURSOR_VALID;
       pCur->curFlags &= ~BTCF_ValidNKey;
@@ -1709,6 +1763,12 @@ i64 sqlite3BtreeIntegerKey(BtCursor *pCur){
 ** For BLOBKEY (index) tables: payload = the key (entire record IS the key)
 */
 static void getCursorPayload(BtCursor *pCur, const u8 **ppData, int *pnData){
+  /* If we have cached payload from a MutMap lookup, return that */
+  if( pCur->pCachedPayload && pCur->nCachedPayload > 0 ){
+    *ppData = pCur->pCachedPayload;
+    *pnData = pCur->nCachedPayload;
+    return;
+  }
   if( pCur->curIntKey ){
     prollyCursorValue(&pCur->pCur, ppData, pnData);
   }else{

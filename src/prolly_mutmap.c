@@ -316,6 +316,31 @@ int prollyMutMapDelete(
 }
 
 /*
+** Look up a key in the skip list. Returns the entry if found, NULL otherwise.
+*/
+ProllyMutMapEntry *prollyMutMapFind(ProllyMutMap *mm,
+                                     const u8 *pKey, int nKey, i64 intKey){
+  ProllyMutMapEntry *p = mm->pHeader;
+  int i;
+  for(i = mm->maxLevel - 1; i >= 0; i--){
+    while( p->aForward[i] ){
+      int c = compareEntries(mm->isIntKey,
+                             p->aForward[i]->pKey, p->aForward[i]->nKey,
+                             p->aForward[i]->intKey,
+                             pKey, nKey, intKey);
+      if( c < 0 ){
+        p = p->aForward[i];
+      } else if( c == 0 ){
+        return p->aForward[i];
+      } else {
+        break;
+      }
+    }
+  }
+  return 0;
+}
+
+/*
 ** Return the number of entries in the mutable map.
 */
 int prollyMutMapCount(ProllyMutMap *mm){

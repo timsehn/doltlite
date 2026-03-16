@@ -50,6 +50,11 @@ int prollyMutMapInsert(ProllyMutMap *mm,
 int prollyMutMapDelete(ProllyMutMap *mm,
                        const u8 *pKey, int nKey, i64 intKey);
 
+/* Look up a key. Returns the entry if found, NULL if not.
+** For INTKEY: pass intKey. For BLOBKEY: pass pKey/nKey. */
+ProllyMutMapEntry *prollyMutMapFind(ProllyMutMap *mm,
+                                     const u8 *pKey, int nKey, i64 intKey);
+
 /* Get number of pending edits */
 int prollyMutMapCount(ProllyMutMap *mm);
 
