@@ -437,6 +437,24 @@ static int flushMutMap(BtCursor *pCur){
 }
 
 /*
+** Sync savepoint stack with db->nSavepoint.
+** SQLite creates user savepoints without notifying the btree layer,
+** so we lazily create savepoint snapshots before each write operation.
+*/
+static int syncSavepoints(BtCursor *pCur){
+  BtShared *pBt = pCur->pBt;
+  sqlite3 *db = pCur->pBtree ? pCur->pBtree->db : 0;
+  if( db ){
+    int target = db->nSavepoint + db->nStatement;
+    while( pBt->nSavepoint < target ){
+      int rc = pushSavepoint(pBt);
+      if( rc!=SQLITE_OK ) return rc;
+    }
+  }
+  return SQLITE_OK;
+}
+
+/*
 ** Ensure the cursor has a MutMap allocated for buffering writes.
 */
 static int ensureMutMap(BtCursor *pCur){
@@ -971,6 +989,14 @@ int sqlite3BtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
     pBt->committedRoot = pBt->root;
     p->inTrans = TRANS_WRITE;
     pBt->inTransaction = TRANS_WRITE;
+    /* Ensure btree savepoint stack matches db->nSavepoint.
+    ** This mimics what sqlite3PagerOpenSavepoint does in stock SQLite. */
+    if( p->db ){
+      while( pBt->nSavepoint < p->db->nSavepoint ){
+        int rc2 = pushSavepoint(pBt);
+        if( rc2!=SQLITE_OK ) return rc2;
+      }
+    }
   } else {
     if( p->inTrans==TRANS_NONE ){
       p->inTrans = TRANS_READ;
@@ -1050,13 +1076,17 @@ int sqlite3BtreeRollback(Btree *p, int tripCode, int writeOnly){
 
 int sqlite3BtreeBeginStmt(Btree *p, int iStatement){
   BtShared *pBt = p->pBt;
-  (void)iStatement;
 
   if( p->inTrans!=TRANS_WRITE ){
     return SQLITE_ERROR;
   }
 
-  return pushSavepoint(pBt);
+  /* Push savepoints until we reach iStatement level */
+  while( pBt->nSavepoint < iStatement ){
+    int rc = pushSavepoint(pBt);
+    if( rc!=SQLITE_OK ) return rc;
+  }
+  return SQLITE_OK;
 }
 
 int sqlite3BtreeSavepoint(Btree *p, int op, int iSavepoint){
@@ -1068,11 +1098,14 @@ int sqlite3BtreeSavepoint(Btree *p, int op, int iSavepoint){
     return SQLITE_OK;
   }
 
-  /* Ensure we have enough savepoints. SQLite may request savepoint
-  ** indices beyond what we've tracked. Grow the stack if needed. */
-  while( iSavepoint >= pBt->nSavepoint && op!=SAVEPOINT_ROLLBACK ){
-    int rc = pushSavepoint(pBt);
-    if( rc!=SQLITE_OK ) return rc;
+  if( op==SAVEPOINT_BEGIN ){
+    /* For BEGIN, iSavepoint is the new nSavepoint count.
+    ** Push savepoints until we reach that count. */
+    while( pBt->nSavepoint < iSavepoint ){
+      int rc = pushSavepoint(pBt);
+      if( rc!=SQLITE_OK ) return rc;
+    }
+    return SQLITE_OK;
   }
 
   if( op==SAVEPOINT_ROLLBACK ){
@@ -1707,6 +1740,9 @@ int sqlite3BtreeInsert(
   assert( pCur->pBtree->inTrans==TRANS_WRITE );
   assert( pCur->curFlags & BTCF_WriteFlag );
 
+  rc = syncSavepoints(pCur);
+  if( rc!=SQLITE_OK ) return rc;
+
   rc = saveAllCursors(pCur->pBt, pCur->pgnoRoot, pCur);
   if( rc!=SQLITE_OK ) return rc;
 
@@ -1787,6 +1823,9 @@ int sqlite3BtreeDelete(BtCursor *pCur, u8 flags){
   assert( pCur->eState==CURSOR_VALID );
   assert( pCur->pBtree->inTrans==TRANS_WRITE );
   assert( pCur->curFlags & BTCF_WriteFlag );
+
+  rc = syncSavepoints(pCur);
+  if( rc!=SQLITE_OK ) return rc;
 
   rc = saveAllCursors(pCur->pBt, pCur->pgnoRoot, pCur);
   if( rc!=SQLITE_OK ) return rc;
