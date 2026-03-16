@@ -1670,16 +1670,28 @@ int sqlite3BtreeIndexMoveto(
       pCur->eState = CURSOR_VALID;
       return SQLITE_OK;
     }else if( cmp>0 ){
-      *pRes = -1;
+      /* Stored key > search key: cursor points at a larger entry */
+      *pRes = 1;
       pCur->eState = CURSOR_VALID;
       return SQLITE_OK;
     }
     rc = prollyCursorNext(&pCur->pCur);
     if( rc!=SQLITE_OK ) break;
   }
-  *pRes = 1;
-  pCur->eState = prollyCursorIsValid(&pCur->pCur) ? CURSOR_VALID : CURSOR_INVALID;
-  return rc;
+  /* Ran off the end — all stored keys < search key.
+  ** Position at the last entry if possible. */
+  {
+    int lastRes = 0;
+    int rc2 = prollyCursorLast(&pCur->pCur, &lastRes);
+    if( rc2==SQLITE_OK && lastRes==0 ){
+      pCur->eState = CURSOR_VALID;
+      *pRes = -1;  /* Cursor at key smaller than target */
+    } else {
+      pCur->eState = CURSOR_INVALID;
+      *pRes = -1;
+    }
+  }
+  return SQLITE_OK;
 }
 
 /* --------------------------------------------------------------------------
