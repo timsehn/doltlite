@@ -39,6 +39,7 @@ struct ChunkStore {
   sqlite3_file *pFile;       /* OS file handle */
   sqlite3_vfs *pVfs;         /* VFS for file operations */
   ProllyHash root;           /* Current root hash */
+  ProllyHash catalog;        /* Catalog hash (table registry + meta) */
   int nChunks;               /* Number of chunks in store */
   i64 iIndexOffset;          /* File offset of chunk index */
   int nIndexSize;            /* Size of chunk index in bytes */
@@ -72,6 +73,10 @@ void chunkStoreGetRoot(ChunkStore *cs, ProllyHash *pRoot);
 
 /* Set the root hash (staged, not committed until chunkStoreCommit) */
 void chunkStoreSetRoot(ChunkStore *cs, const ProllyHash *pRoot);
+
+/* Get/set the catalog hash (table registry + meta values) */
+void chunkStoreGetCatalog(ChunkStore *cs, ProllyHash *pCat);
+void chunkStoreSetCatalog(ChunkStore *cs, const ProllyHash *pCat);
 
 /* Check if a chunk exists */
 int chunkStoreHas(ChunkStore *cs, const ProllyHash *hash);

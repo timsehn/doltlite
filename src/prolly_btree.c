@@ -405,6 +405,84 @@ static void refreshCursorRoot(BtCursor *pCur){
 }
 
 /*
+** Serialize the table registry + meta values into a catalog chunk.
+** Format: [iNextTable:4][nTables:4][meta[0..15]: 64 bytes]
+**         per table: [iTable:4][flags:1][root:20]
+*/
+static int serializeCatalog(BtShared *pBt, u8 **ppOut, int *pnOut){
+  int nTables = pBt->nTables;
+  int sz = 4 + 4 + 64 + nTables * 25;
+  u8 *buf = sqlite3_malloc(sz);
+  u8 *p;
+  int i;
+  if( !buf ) return SQLITE_NOMEM;
+  p = buf;
+  /* iNextTable */
+  p[0]=(u8)(pBt->iNextTable); p[1]=(u8)(pBt->iNextTable>>8);
+  p[2]=(u8)(pBt->iNextTable>>16); p[3]=(u8)(pBt->iNextTable>>24);
+  p += 4;
+  /* nTables */
+  p[0]=(u8)nTables; p[1]=(u8)(nTables>>8);
+  p[2]=(u8)(nTables>>16); p[3]=(u8)(nTables>>24);
+  p += 4;
+  /* meta values */
+  for(i=0; i<16; i++){
+    u32 v = pBt->aMeta[i];
+    p[0]=(u8)v; p[1]=(u8)(v>>8); p[2]=(u8)(v>>16); p[3]=(u8)(v>>24);
+    p += 4;
+  }
+  /* table entries */
+  for(i=0; i<nTables; i++){
+    struct TableEntry *t = &pBt->aTables[i];
+    u32 pg = t->iTable;
+    p[0]=(u8)pg; p[1]=(u8)(pg>>8); p[2]=(u8)(pg>>16); p[3]=(u8)(pg>>24);
+    p += 4;
+    *p++ = t->flags;
+    memcpy(p, t->root.data, PROLLY_HASH_SIZE);
+    p += PROLLY_HASH_SIZE;
+  }
+  *ppOut = buf;
+  *pnOut = sz;
+  return SQLITE_OK;
+}
+
+/*
+** Deserialize catalog chunk into the table registry + meta values.
+*/
+static int deserializeCatalog(BtShared *pBt, const u8 *data, int nData){
+  const u8 *p = data;
+  int nTables, i;
+  if( nData < 72 ) return SQLITE_CORRUPT; /* minimum: 4+4+64 */
+  /* iNextTable */
+  pBt->iNextTable = (Pgno)(p[0] | (p[1]<<8) | (p[2]<<16) | (p[3]<<24));
+  p += 4;
+  /* nTables */
+  nTables = (int)(p[0] | (p[1]<<8) | (p[2]<<16) | (p[3]<<24));
+  p += 4;
+  if( nData < 72 + nTables*25 ) return SQLITE_CORRUPT;
+  /* meta values */
+  for(i=0; i<16; i++){
+    pBt->aMeta[i] = (u32)(p[0] | (p[1]<<8) | (p[2]<<16) | (p[3]<<24));
+    p += 4;
+  }
+  /* table entries */
+  sqlite3_free(pBt->aTables);
+  pBt->aTables = 0;
+  pBt->nTables = 0;
+  pBt->nTablesAlloc = 0;
+  for(i=0; i<nTables; i++){
+    Pgno iTable = (Pgno)(p[0] | (p[1]<<8) | (p[2]<<16) | (p[3]<<24));
+    p += 4;
+    u8 flags = *p++;
+    struct TableEntry *pTE = addTable(pBt, iTable, flags);
+    if( !pTE ) return SQLITE_NOMEM;
+    memcpy(pTE->root.data, p, PROLLY_HASH_SIZE);
+    p += PROLLY_HASH_SIZE;
+  }
+  return SQLITE_OK;
+}
+
+/*
 ** Flush pending mutations from a cursor's MutMap into the table's
 ** prolly tree.  Produces a new root hash and updates the table registry.
 */
@@ -773,7 +851,32 @@ int sqlite3BtreeOpen(
   pBt->aMeta[BTREE_INCR_VACUUM] = 0;
   pBt->aMeta[BTREE_APPLICATION_ID] = 0;
 
-  /* Table 1 is always the master schema table */
+  /* Try to load catalog from existing store. If no catalog exists
+  ** (new database), initialize defaults. */
+  {
+    ProllyHash catHash;
+    chunkStoreGetCatalog(&pBt->store, &catHash);
+    if( !prollyHashIsEmpty(&catHash) ){
+      u8 *catData = 0;
+      int nCatData = 0;
+      rc = chunkStoreGet(&pBt->store, &catHash, &catData, &nCatData);
+      if( rc==SQLITE_OK && catData ){
+        rc = deserializeCatalog(pBt, catData, nCatData);
+        sqlite3_free(catData);
+        if( rc!=SQLITE_OK ){
+          pagerShimDestroy(pBt->pPagerShim);
+          prollyCacheFree(&pBt->cache);
+          chunkStoreClose(&pBt->store);
+          sqlite3_free(pBt);
+          sqlite3_free(p);
+          return rc;
+        }
+        goto catalog_loaded;
+      }
+    }
+  }
+
+  /* No catalog found — initialize fresh database */
   pBt->iNextTable = 2;
   if( !addTable(pBt, 1, BTREE_INTKEY) ){
     pagerShimDestroy(pBt->pPagerShim);
@@ -784,6 +887,7 @@ int sqlite3BtreeOpen(
     return SQLITE_NOMEM;
   }
 
+catalog_loaded:
   p->db = db;
   p->pBt = pBt;
   p->inTrans = TRANS_NONE;
@@ -1028,6 +1132,21 @@ int sqlite3BtreeCommitPhaseTwo(Btree *p, int bCleanup){
     /* Flush all pending mutations before committing */
     rc = flushAllPending(pBt, 0);
     if( rc!=SQLITE_OK ) return rc;
+    /* Serialize and store the catalog (table registry + meta) */
+    {
+      u8 *catData = 0;
+      int nCatData = 0;
+      ProllyHash catHash;
+      rc = serializeCatalog(pBt, &catData, &nCatData);
+      if( rc==SQLITE_OK ){
+        rc = chunkStorePut(&pBt->store, catData, nCatData, &catHash);
+        sqlite3_free(catData);
+        if( rc==SQLITE_OK ){
+          chunkStoreSetCatalog(&pBt->store, &catHash);
+        }
+      }
+      if( rc!=SQLITE_OK ) return rc;
+    }
     chunkStoreSetRoot(&pBt->store, &pBt->root);
     rc = chunkStoreCommit(&pBt->store);
     if( rc==SQLITE_OK ){
