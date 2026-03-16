@@ -462,18 +462,22 @@ static int ensureMutMap(BtCursor *pCur){
 static int saveCursorPosition(BtCursor *pCur){
   int rc = SQLITE_OK;
 
-  if( pCur->eState!=CURSOR_VALID ){
+  if( pCur->eState!=CURSOR_VALID && pCur->eState!=CURSOR_SKIPNEXT ){
     return SQLITE_OK;
   }
   if( pCur->isPinned ){
     return SQLITE_OK;
   }
 
-  rc = prollyCursorSave(&pCur->pCur);
-  if( rc!=SQLITE_OK ){
-    return rc;
+  /* If the prolly cursor isn't actually valid (e.g. empty tree, or
+  ** cursor was set to CURSOR_VALID without a successful seek), just
+  ** invalidate rather than trying to save a position we don't have. */
+  if( !prollyCursorIsValid(&pCur->pCur) ){
+    pCur->eState = CURSOR_INVALID;
+    return SQLITE_OK;
   }
 
+  /* Save key BEFORE prollyCursorSave releases node references */
   if( pCur->curIntKey ){
     pCur->nKey = prollyCursorIntKey(&pCur->pCur);
     pCur->pKey = 0;
@@ -493,6 +497,11 @@ static int saveCursorPosition(BtCursor *pCur){
       pCur->pKey = 0;
       pCur->nKey = 0;
     }
+  }
+
+  rc = prollyCursorSave(&pCur->pCur);
+  if( rc!=SQLITE_OK ){
+    return rc;
   }
 
   pCur->eState = CURSOR_REQUIRESEEK;
@@ -1457,8 +1466,10 @@ int sqlite3BtreeNext(BtCursor *pCur, int flags){
   int rc;
   (void)flags;
 
-  assert( pCur->eState==CURSOR_VALID
-       || pCur->eState==CURSOR_SKIPNEXT );
+  /* Handle cursors invalidated by delete */
+  if( pCur->eState==CURSOR_INVALID ){
+    return SQLITE_DONE;
+  }
 
   if( pCur->eState==CURSOR_SKIPNEXT ){
     pCur->eState = CURSOR_VALID;
@@ -1486,8 +1497,9 @@ int sqlite3BtreePrevious(BtCursor *pCur, int flags){
   int rc;
   (void)flags;
 
-  assert( pCur->eState==CURSOR_VALID
-       || pCur->eState==CURSOR_SKIPNEXT );
+  if( pCur->eState==CURSOR_INVALID ){
+    return SQLITE_DONE;
+  }
 
   if( pCur->eState==CURSOR_SKIPNEXT ){
     pCur->eState = CURSOR_VALID;
@@ -1733,6 +1745,16 @@ int sqlite3BtreeInsert(
   rc = flushMutMap(pCur);
   if( rc!=SQLITE_OK ) return rc;
 
+  /* Reinitialize cursor on the new tree root (flush invalidates pointers) */
+  {
+    struct TableEntry *pTE2 = findTable(pCur->pBt, pCur->pgnoRoot);
+    if( pTE2 ){
+      prollyCursorClose(&pCur->pCur);
+      prollyCursorInit(&pCur->pCur, &pCur->pBt->store, &pCur->pBt->cache,
+                       &pTE2->root, pTE2->flags);
+    }
+  }
+
   /* Reposition cursor at the inserted entry */
   if( pCur->curIntKey ){
     int res = 0;
@@ -1783,25 +1805,61 @@ int sqlite3BtreeDelete(BtCursor *pCur, u8 flags){
 
   if( rc!=SQLITE_OK ) return rc;
 
-  rc = flushMutMap(pCur);
-  if( rc!=SQLITE_OK ) return rc;
-
-  if( flags & BTREE_SAVEPOSITION ){
-    if( prollyCursorIsValid(&pCur->pCur) ){
-      pCur->eState = CURSOR_SKIPNEXT;
-      pCur->skipNext = 1;
+  /* Save the key before flush (flush rebuilds tree, invalidating pointers) */
+  {
+    i64 savedIntKey = 0;
+    u8 *savedBlobKey = 0;
+    int savedBlobKeyLen = 0;
+    if( pCur->curIntKey ){
+      savedIntKey = prollyCursorIntKey(&pCur->pCur);
     } else {
-      int res;
-      rc = prollyCursorLast(&pCur->pCur, &res);
-      if( rc==SQLITE_OK && res==0 ){
+      const u8 *pk; int nk;
+      prollyCursorKey(&pCur->pCur, &pk, &nk);
+      if( nk > 0 ){
+        savedBlobKey = sqlite3_malloc(nk);
+        if( savedBlobKey ){ memcpy(savedBlobKey, pk, nk); savedBlobKeyLen = nk; }
+      }
+    }
+
+    rc = flushMutMap(pCur);
+    if( rc!=SQLITE_OK ){
+      sqlite3_free(savedBlobKey);
+      return rc;
+    }
+
+    /* Reinitialize cursor on the new tree root */
+    {
+      struct TableEntry *pTE2 = findTable(pCur->pBt, pCur->pgnoRoot);
+      if( pTE2 ){
+        prollyCursorClose(&pCur->pCur);
+        prollyCursorInit(&pCur->pCur, &pCur->pBt->store, &pCur->pBt->cache,
+                         &pTE2->root, pTE2->flags);
+      }
+    }
+
+    if( flags & BTREE_SAVEPOSITION ){
+      /* The key was deleted. Seek to where it would have been.
+      ** The cursor will land on the next entry (or EOF). */
+      int res = 0;
+      if( pCur->curIntKey ){
+        rc = prollyCursorSeekInt(&pCur->pCur, savedIntKey, &res);
+      } else if( savedBlobKey ){
+        rc = prollyCursorSeekBlob(&pCur->pCur, savedBlobKey, savedBlobKeyLen, &res);
+      } else {
+        rc = SQLITE_OK;
+        res = -1;
+      }
+      if( rc==SQLITE_OK && prollyCursorIsValid(&pCur->pCur) ){
+        /* Cursor is on the next entry. Tell Next() it's a no-op. */
         pCur->eState = CURSOR_SKIPNEXT;
-        pCur->skipNext = -1;
+        pCur->skipNext = 1;
       } else {
         pCur->eState = CURSOR_INVALID;
       }
+    } else {
+      pCur->eState = CURSOR_INVALID;
     }
-  } else {
-    pCur->eState = CURSOR_INVALID;
+    sqlite3_free(savedBlobKey);
   }
 
   pCur->curFlags &= ~(BTCF_ValidNKey|BTCF_AtLast);

@@ -485,6 +485,14 @@ int prollyCursorSave(ProllyCursor *cur){
     return SQLITE_OK;
   }
 
+  /* Verify we actually have a valid leaf node to read from */
+  if( cur->iLevel < 0 || cur->iLevel >= PROLLY_CURSOR_MAX_DEPTH
+   || !cur->aLevel[cur->iLevel].pEntry ){
+    cur->hasSavedPosition = 0;
+    cur->eState = PROLLY_CURSOR_INVALID;
+    return SQLITE_OK;
+  }
+
   /* Save the key */
   if( cur->flags & PROLLY_NODE_INTKEY ){
     cur->iSavedIntKey = prollyCursorIntKey(cur);
