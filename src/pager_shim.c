@@ -32,6 +32,43 @@ BtShared *SQLITE_WSD sqlite3SharedCacheList = 0;
 #define SHIM(p) ((PagerShim*)(p))
 
 /* -----------------------------------------------------------------------
+** Dummy file object for :memory: databases
+** ----------------------------------------------------------------------- */
+static int dummyClose(sqlite3_file *p){ (void)p; return SQLITE_OK; }
+static int dummyRead(sqlite3_file *p, void *b, int n, sqlite3_int64 o){
+  (void)p; (void)b; (void)n; (void)o; return SQLITE_IOERR_SHORT_READ;
+}
+static int dummyWrite(sqlite3_file *p, const void *b, int n, sqlite3_int64 o){
+  (void)p; (void)b; (void)n; (void)o; return SQLITE_OK;
+}
+static int dummyTruncate(sqlite3_file *p, sqlite3_int64 s){
+  (void)p; (void)s; return SQLITE_OK;
+}
+static int dummySync(sqlite3_file *p, int f){ (void)p; (void)f; return SQLITE_OK; }
+static int dummyFileSize(sqlite3_file *p, sqlite3_int64 *s){
+  (void)p; *s = 0; return SQLITE_OK;
+}
+static int dummyLock(sqlite3_file *p, int l){ (void)p; (void)l; return SQLITE_OK; }
+static int dummyUnlock(sqlite3_file *p, int l){ (void)p; (void)l; return SQLITE_OK; }
+static int dummyCheckLock(sqlite3_file *p, int *r){ (void)p; *r = 0; return SQLITE_OK; }
+static int dummyFileControl(sqlite3_file *p, int op, void *a){
+  (void)p; (void)op; (void)a; return SQLITE_NOTFOUND;
+}
+static int dummySectorSize(sqlite3_file *p){ (void)p; return 4096; }
+static int dummyDevChar(sqlite3_file *p){ (void)p; return 0; }
+static const sqlite3_io_methods dummyIoMethods = {
+  1, dummyClose, dummyRead, dummyWrite, dummyTruncate, dummySync,
+  dummyFileSize, dummyLock, dummyUnlock, dummyCheckLock,
+  dummyFileControl, dummySectorSize, dummyDevChar,
+  0, 0, 0, 0, 0, 0, 0
+};
+static sqlite3_file dummyFileObj;
+static sqlite3_file *pagerShimDummyFile(void){
+  dummyFileObj.pMethods = &dummyIoMethods;
+  return &dummyFileObj;
+}
+
+/* -----------------------------------------------------------------------
 ** Lifecycle: create and destroy
 ** ----------------------------------------------------------------------- */
 
@@ -82,6 +119,10 @@ PagerShim *pagerShimCreate(
   }
   pShim->zJournal[0] = '\0';
 
+  /* Provide a dummy file object when pFd is NULL (e.g., :memory: dbs). */
+  if( pFd==0 ){
+    pFd = pagerShimDummyFile();
+  }
   pShim->pFd          = pFd;
   pShim->pVfs         = pVfs;
   pShim->journalMode  = PAGER_JOURNALMODE_DELETE;

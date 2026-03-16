@@ -49,6 +49,7 @@
 #include "prolly_mutmap.h"
 #include "prolly_mutate.h"
 #include "pager_shim.h"
+#include "vdbeInt.h"
 
 #include <string.h>
 #include <assert.h>
@@ -2051,13 +2052,19 @@ int sqlite3BtreeIntegrityCheck(
   }
   pBt = p->pBt;
 
-  for(i=0; i<nRoot && nErr<mxErr; i++){
-    struct TableEntry *pTE = findTable(pBt, aRoot[i]);
-    if( !pTE ) continue;
-
-    if( !prollyHashIsEmpty(&pTE->root) ){
-      if( !chunkStoreHas(&pBt->store, &pTE->root) ){
-        nErr++;
+  for(i=0; i<nRoot; i++){
+    /* Set row count to 0 for each table (we don't count precisely) */
+    if( aCnt ){
+      sqlite3VdbeMemSetInt64(&aCnt[i], 0);
+    }
+    if( nErr>=mxErr ) continue;
+    {
+      struct TableEntry *pTE = findTable(pBt, aRoot[i]);
+      if( !pTE ) continue;
+      if( !prollyHashIsEmpty(&pTE->root) ){
+        if( !chunkStoreHas(&pBt->store, &pTE->root) ){
+          nErr++;
+        }
       }
     }
   }
