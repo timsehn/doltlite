@@ -392,6 +392,17 @@ static void removeTable(BtShared *pBt, Pgno iTable){
 /*
 ** Invalidate all cursors on a given table (or all if iTable==0).
 */
+/*
+** Invalidate the schema cache. Called on rollback/savepoint rollback
+** so that SQLite re-reads sqlite_master on the next operation.
+*/
+static void invalidateSchema(BtShared *pBt){
+  if( pBt->pSchema && pBt->xFreeSchema ){
+    pBt->xFreeSchema(pBt->pSchema);
+    pBt->pSchema = 0;
+  }
+}
+
 static void invalidateCursors(BtShared *pBt, Pgno iTable, int errCode){
   BtCursor *p;
   for(p=pBt->pCursor; p; p=p->pNext){
@@ -1208,6 +1219,7 @@ int sqlite3BtreeRollback(Btree *p, int tripCode, int writeOnly){
       }
     }
     invalidateCursors(pBt, 0, tripCode ? tripCode : SQLITE_ABORT);
+    invalidateSchema(pBt);
     chunkStoreRollback(&pBt->store);
   }
 
@@ -1275,6 +1287,7 @@ int sqlite3BtreeSavepoint(Btree *p, int op, int iSavepoint){
       }
       pBt->nSavepoint = iSavepoint;
       invalidateCursors(pBt, 0, SQLITE_ABORT);
+      invalidateSchema(pBt);
     } else if( iSavepoint>=0 && iSavepoint>=pBt->nSavepoint ){
       /* SQLite asked to rollback to a savepoint we don't have.
       ** Restore from committed state instead. */
@@ -1292,6 +1305,7 @@ int sqlite3BtreeSavepoint(Btree *p, int op, int iSavepoint){
       }
       pBt->root = pBt->committedRoot;
       invalidateCursors(pBt, 0, SQLITE_ABORT);
+      invalidateSchema(pBt);
     } else if( iSavepoint<0 ){
       int j;
       for(j=0; j<pBt->nSavepoint; j++){
@@ -1312,6 +1326,7 @@ int sqlite3BtreeSavepoint(Btree *p, int op, int iSavepoint){
       }
       pBt->nSavepoint = 0;
       invalidateCursors(pBt, 0, SQLITE_ABORT);
+      invalidateSchema(pBt);
     }
   } else {
     /* SAVEPOINT_RELEASE: free savepoints above this one */
@@ -1850,14 +1865,18 @@ int sqlite3BtreeIndexMoveto(
     int nKey;
     int cmp;
     prollyCursorKey(&pCur->pCur, &pKey, &nKey);
+    pIdxKey->eqSeen = 0;
     cmp = sqlite3VdbeRecordCompare(nKey, pKey, pIdxKey);
-    if( cmp==0 ){
-      *pRes = 0;
+    if( cmp==0 || pIdxKey->eqSeen ){
+      /* Exact match. eqSeen handles the case where default_rc != 0
+      ** (e.g., OP_SeekGE sets default_rc=+1) which makes
+      ** sqlite3VdbeRecordCompare return non-zero even on match. */
+      *pRes = cmp;
       pCur->eState = CURSOR_VALID;
       return SQLITE_OK;
     }else if( cmp>0 ){
       /* Stored key > search key: cursor points at a larger entry */
-      *pRes = 1;
+      *pRes = cmp;
       pCur->eState = CURSOR_VALID;
       return SQLITE_OK;
     }
