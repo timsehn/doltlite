@@ -54,40 +54,13 @@ SELECT doltlite_engine();
 
 - 8,500+ lines of new C code across 23 files
 - All ~60 btree.h functions implemented
-- **20,314 SQLite test cases passing** across 27 test files
-- 22 of 27 test files at **100% pass rate** (within 60s timeout per file)
+- **87,000+ SQLite test cases passing** across 90+ test files
 - File persistence working (data survives close+reopen)
 - Bulk inserts up to 100K rows (10K rows in 0.16s)
 
-SQLite test results (27 files):
-
-| Test File | Result |
-|-----------|--------|
-| func | 15,030/15,030 |
-| date | 1,683/1,683 |
-| expr | 660/660 |
-| auth | 376/376 |
-| trans | 328/328 |
-| where | 317/317 |
-| select1 | 191/191 |
-| join | 191/191 |
-| conflict | 147/147 |
-| update | 140/140 |
-| savepoint | 139/139 |
-| cse | 124/124 |
-| select4 | 123/123 |
-| index | 120/120 |
-| alter | 119/119 |
-| view | 118/118 |
-| attach | 112/112 |
-| select3 | 90/90 |
-| insert | 83/83 |
-| subquery | 81/81 |
-| delete | 67/67 |
-| vacuum | 46/46 |
-| select2 | 20/20 |
-| coalesce | 9/9 |
-| build, collate, fkey, trigger | timeout on first test |
+Largest passing test files: select9 (36,716), e_expr (16,618), func (15,030),
+randexpr1 (2,600), in2 (1,999), date (1,683), printf (1,410), fkey2 (1,216),
+enc4 (1,114), expr (660), types2 (398), auth (376), trans (328), where (317).
 
 ## Architecture
 
