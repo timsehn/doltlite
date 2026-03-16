@@ -54,7 +54,7 @@ SELECT doltlite_engine();
 
 - 8,500+ lines of new C code across 23 files
 - All ~60 btree.h functions implemented
-- **87,000+ SQLite test cases passing** across 90+ test files
+- **87,000+ SQLite test cases passing** across 90+ test files, **0 correctness failures**
 - File persistence working (data survives close+reopen)
 - Bulk inserts up to 100K rows (10K rows in 0.16s)
 
