@@ -298,7 +298,7 @@ HAVE_WASI_SDK ?= 0
 # With the above-described defined, the rest of this make script will
 # build the project's deliverables and testing tools.
 ################################################################################
-all:	sqlite3.h sqlite3.c
+all:	doltlite$(T.exe)
 
 ########################################################################
 ########################################################################
@@ -565,7 +565,7 @@ PROLLY_OBJS = prolly_hash.o prolly_arena.o prolly_node.o prolly_cache.o \
               chunk_store.o prolly_cursor.o prolly_mutmap.o prolly_chunker.o \
               prolly_mutate.o prolly_diff.o prolly_btree.o pager_shim.o
 
-DOLTLITE_PROLLY ?= 0
+DOLTLITE_PROLLY ?= 1
 ifeq ($(DOLTLITE_PROLLY),1)
   # Replace btree.o/pager.o/wal.o/btmutex.o/backup.o with prolly engine
   LIBOBJS0 := $(filter-out btree.o pager.o wal.o btmutex.o backup.o,$(LIBOBJS0))
@@ -2267,7 +2267,9 @@ sqlite3$(T.exe):	shell.c sqlite3.c
 #
 sqlite3$(T.exe)-1:
 sqlite3$(T.exe)-0: sqlite3$(T.exe)
-all: sqlite3$(T.exe)-$(HAVE_WASI_SDK)
+# Doltlite: doltlite binary is the default (built via all: doltlite rule above).
+# Stock sqlite3 shell can still be built explicitly: make sqlite3
+# all: sqlite3$(T.exe)-$(HAVE_WASI_SDK)
 
 # The "sqlite3d" CLI is build using separate source files.  This
 # is useful during development and debugging.
@@ -2278,8 +2280,16 @@ sqlite3d$(T.exe):	shell.c $(LIBOBJS0)
 		$(CFLAGS.readline) $(SHELL_OPT) \
 		$(LDFLAGS.libsqlite3) $(LDFLAGS.readline)
 
-install-shell-0: sqlite3$(T.exe) $(install-dir.bin)
-	$(INSTALL) sqlite3$(T.exe) "$(install-dir.bin)"
+# Doltlite: the default binary name for this fork.
+# Uses non-amalgamation build with the prolly tree engine.
+doltlite$(T.exe):	shell.c $(LIBOBJS0)
+	$(T.link) -o $@ \
+		shell.c $(LIBOBJS0) \
+		$(CFLAGS.readline) $(SHELL_OPT) \
+		$(LDFLAGS.libsqlite3) $(LDFLAGS.readline)
+
+install-shell-0: doltlite$(T.exe) $(install-dir.bin)
+	$(INSTALL) doltlite$(T.exe) "$(install-dir.bin)"
 install-shell-1:
 install: install-shell-$(HAVE_WASI_SDK)
 
@@ -2569,7 +2579,7 @@ help:
 #
 #
 tidy:
-	rm -f *.o *.obj *.c *.da *.bb *.bbg gmon.* *.rws sqlite3$(T.exe)
+	rm -f *.o *.obj *.c *.da *.bb *.bbg gmon.* *.rws sqlite3$(T.exe) doltlite$(T.exe)
 	rm -f fts5.h keywordhash.h opcodes.h sqlite3.h sqlite3ext.h sqlite3session.h
 	rm -rf .libs .deps tsrc .target_source
 	rm -f lemon$(B.exe) sqlite*.tar.gz
