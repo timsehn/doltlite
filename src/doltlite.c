@@ -314,6 +314,18 @@ static void doltliteCommitFunc(
     return;
   }
 
+  /* Check if staged == HEAD (nothing actually changed) */
+  {
+    ProllyHash headCatHash;
+    rc = doltliteGetHeadCatalogHash(db, &headCatHash);
+    if( rc==SQLITE_OK && !prollyHashIsEmpty(&headCatHash)
+     && prollyHashCompare(&catalogHash, &headCatHash)==0 ){
+      sqlite3_result_error(context,
+        "nothing to commit, working tree clean (use dolt_add to stage changes)", -1);
+      return;
+    }
+  }
+
   /* Build commit object */
   memset(&commit, 0, sizeof(commit));
   chunkStoreGetHeadCommit(cs, &commit.parentHash);
@@ -357,11 +369,10 @@ static void doltliteCommitFunc(
     return;
   }
 
-  /* Update HEAD, staged = committed catalog, persist */
+  /* Update HEAD and staged. Do NOT overwrite the working catalog (cs->catalog)
+  ** — it represents the live database state which may have unstaged changes. */
   chunkStoreSetHeadCommit(cs, &commitHash);
-  chunkStoreSetCatalog(cs, &catalogHash);
   chunkStoreSetStagedCatalog(cs, &catalogHash); /* staged = HEAD after commit */
-  chunkStoreSetRoot(cs, &rootHash);
   rc = chunkStoreCommit(cs);
   if( rc!=SQLITE_OK ){
     sqlite3_result_error_code(context, rc);

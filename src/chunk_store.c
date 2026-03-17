@@ -200,17 +200,17 @@ static int csReadManifest(ChunkStore *cs){
   u32 magic, version;
   int rc;
 
-  rc = sqlite3OsRead(cs->pFile, aBuf, CHUNK_MANIFEST_SIZE, 0);
+  /* Read first 8 bytes to check version, then read the appropriate size */
+  rc = sqlite3OsRead(cs->pFile, aBuf, 8, 0);
   if( rc != SQLITE_OK ) return rc;
 
   magic = CS_READ_U32(aBuf + 0);
   version = CS_READ_U32(aBuf + 4);
-  if( magic != CHUNK_STORE_MAGIC ){
-    return SQLITE_NOTADB;
-  }
-  if( version != CHUNK_STORE_VERSION ){
-    return SQLITE_NOTADB;
-  }
+  if( magic != CHUNK_STORE_MAGIC ) return SQLITE_NOTADB;
+  if( version != CHUNK_STORE_VERSION ) return SQLITE_NOTADB;
+
+  rc = sqlite3OsRead(cs->pFile, aBuf, CHUNK_MANIFEST_SIZE, 0);
+  if( rc != SQLITE_OK ) return rc;
 
   memcpy(cs->root.data, aBuf + 8, PROLLY_HASH_SIZE);
   cs->nChunks = (int)CS_READ_U32(aBuf + 28);
