@@ -3003,7 +3003,7 @@ void doltliteSetSessionStaged(sqlite3 *db, const ProllyHash *pStaged){
 extern void doltliteRegister(sqlite3 *db);
 
 static void registerDoltiteFunctions(sqlite3 *db){
-  sqlite3_create_function(db, "doltite_engine", 0, SQLITE_UTF8, 0,
+  sqlite3_create_function(db, "doltlite_engine", 0, SQLITE_UTF8, 0,
                           doltiteEngineFunc, 0, 0);
   doltliteRegister(db);
 }
