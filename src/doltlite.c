@@ -46,7 +46,7 @@ extern int doltliteLogRegister(sqlite3 *db);
 extern int doltliteStatusRegister(sqlite3 *db);
 extern int doltliteDiffRegister(sqlite3 *db);
 extern int doltliteBranchRegister(sqlite3 *db);
-extern int doltliteAncestorRegister(sqlite3 *db);
+extern int doltliteTagRegister(sqlite3 *db);
 
 /* --------------------------------------------------------------------------
 ** dolt_add('tablename') or dolt_add('-A')
@@ -489,7 +489,7 @@ void doltliteRegister(sqlite3 *db){
   doltliteStatusRegister(db);
   doltliteDiffRegister(db);
   doltliteBranchRegister(db);
-  doltliteAncestorRegister(db);
+  doltliteTagRegister(db);
 }
 
 #endif /* DOLTLITE_PROLLY */
