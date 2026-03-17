@@ -23,23 +23,34 @@ if echo "$VER" | grep -q "DoltLite"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)
 # -version includes SQLite version
 if echo "$VER" | grep -q "SQLite"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); ERRORS="$ERRORS\nFAIL: version_sqlite\n  expected: SQLite\n  got:      $VER"; fi
 
-# Interactive banner says DoltLite (use script to fake a tty)
-BANNER=$(script -q /dev/null $DOLTLITE :memory: <<'EOF' 2>&1 | head -3
+# Interactive banner and prompt tests (require a TTY via `script`)
+# macOS: script -q /dev/null cmd
+# Linux: script -qc "cmd" /dev/null
+run_script() {
+  if [ "$(uname)" = "Darwin" ]; then
+    script -q /dev/null "$@" 2>&1
+  else
+    script -qc "$*" /dev/null 2>&1
+  fi
+}
+
+BANNER=$(run_script $DOLTLITE :memory: <<'EOF' | head -5
 .quit
 EOF
 )
+
 if echo "$BANNER" | grep -q "DoltLite"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); ERRORS="$ERRORS\nFAIL: banner\n  expected: DoltLite\n  got:      $BANNER"; fi
 
-# Prompt says doltlite> (may not appear in all script captures, so check with a query)
-PROMPT=$(script -q /dev/null $DOLTLITE :memory: <<'PEOF' 2>&1
+# Banner does NOT say "SQLite version" (the old format)
+if echo "$BANNER" | grep -q "SQLite version"; then FAIL=$((FAIL+1)); ERRORS="$ERRORS\nFAIL: no_sqlite_version\n  should not contain: SQLite version\n  got:      $BANNER"; else PASS=$((PASS+1)); fi
+
+# Prompt says doltlite>
+PROMPT=$(run_script $DOLTLITE :memory: <<'PEOF' | cat
 SELECT 1;
 .quit
 PEOF
 )
 if echo "$PROMPT" | grep -q "doltlite>"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); ERRORS="$ERRORS\nFAIL: prompt\n  expected: doltlite>\n  got:      $PROMPT"; fi
-
-# Banner does NOT say "SQLite version" (the old format)
-if echo "$BANNER" | grep -q "SQLite version"; then FAIL=$((FAIL+1)); ERRORS="$ERRORS\nFAIL: no_sqlite_version\n  should not contain: SQLite version\n  got:      $BANNER"; else PASS=$((PASS+1)); fi
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
