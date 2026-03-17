@@ -12745,7 +12745,11 @@ static void main_init(ShellState *p) {
 #endif
   sqlite3_config(SQLITE_CONFIG_URI, 1);
   sqlite3_config(SQLITE_CONFIG_MULTITHREAD);
+#ifdef DOLTLITE_PROLLY
+  sqlite3_snprintf(sizeof(mainPrompt), mainPrompt,"doltlite> ");
+#else
   sqlite3_snprintf(sizeof(mainPrompt), mainPrompt,"sqlite> ");
+#endif
   sqlite3_snprintf(sizeof(continuePrompt), continuePrompt,"   ...> ");
 }
 
@@ -13328,8 +13332,13 @@ int SQLITE_CDECL main(int argc, char **argv){
     }else if( cli_strcmp(z,"-bail")==0 ){
       /* No-op.  The bail_on_error flag should already be set. */
     }else if( cli_strcmp(z,"-version")==0 ){
+#ifdef DOLTLITE_PROLLY
+      cli_printf(stdout, "DoltLite 0.1.0 (SQLite %s, %d-bit)\n",
+            sqlite3_libversion(), 8*(int)sizeof(char*));
+#else
       cli_printf(stdout, "%s %s (%d-bit)\n",
             sqlite3_libversion(), sqlite3_sourceid(), 8*(int)sizeof(char*));
+#endif
       rc = 0;
       goto shell_main_exit;
     }else if( cli_strcmp(z,"-interactive")==0 ){
@@ -13476,10 +13485,17 @@ int SQLITE_CDECL main(int argc, char **argv){
     if( stdin_is_interactive ){
       char *zHome;
       char *zHistory;
+#ifdef DOLTLITE_PROLLY
+      cli_printf(stdout,
+            "DoltLite 0.1.0 (SQLite %s)\n"
+            "Enter \".help\" for usage hints.\n",
+            sqlite3_libversion());
+#else
       cli_printf(stdout,
             "SQLite version %s %.19s\n" /*extra-version-info*/
             "Enter \".help\" for usage hints.\n",
             sqlite3_libversion(), sqlite3_sourceid());
+#endif
       if( warnInmemoryDb ){
         sputz(stdout, "Connected to a ");
         printBold("transient in-memory database");

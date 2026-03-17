@@ -35,8 +35,11 @@ jobs:
     - name: Verify engine
       run: |
         cd build
-        echo "SELECT doltite_engine();" | ./doltlite :memory: | grep -q "prolly"
+        echo "SELECT doltlite_engine();" | ./doltlite :memory: | grep -q "prolly"
         echo "Engine: prolly (verified)"
+
+    - name: Branding tests
+      run: cd build && bash ../test/doltlite_branding.sh
 
     - name: Smoke test
       run: |
