@@ -59,6 +59,9 @@ jobs:
         result=$(echo "SELECT y FROM t;" | ./doltlite /tmp/test.db)
         [ "$result" = "persist" ] && echo "Persistence: OK" || (echo "Persistence: FAIL" && exit 1)
 
+    - name: Dolt commit and log tests
+      run: cd build && bash ../test/doltlite_commit.sh
+
     - name: Build testfixture
       run: cd build && make testfixture
 
