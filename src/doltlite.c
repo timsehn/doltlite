@@ -53,6 +53,7 @@ extern int doltliteTagRegister(sqlite3 *db);
 extern int doltliteGcRegister(sqlite3 *db);
 extern void doltliteRegisterDiffTables(sqlite3 *db);
 extern int doltliteAncestorRegister(sqlite3 *db);
+extern void doltliteRegisterHistoryTables(sqlite3 *db);
 
 /* From doltlite_ancestor.c */
 extern int doltliteFindAncestor(sqlite3 *db, const ProllyHash *h1,
@@ -440,8 +441,9 @@ static void doltliteCommitFunc(
 
   doltliteHashToHex(&commitHash, hexBuf);
 
-  /* Register dolt_diff_<table> modules for any new tables in this commit */
+  /* Register dolt_diff_<table> and dolt_history_<table> for any new tables */
   doltliteRegisterDiffTables(db);
+  doltliteRegisterHistoryTables(db);
 
   sqlite3_result_text(context, hexBuf, -1, SQLITE_TRANSIENT);
 }
@@ -1070,6 +1072,7 @@ void doltliteRegister(sqlite3 *db){
   doltliteGcRegister(db);
   doltliteRegisterDiffTables(db);
   doltliteAncestorRegister(db);
+  doltliteRegisterHistoryTables(db);
 }
 
 #endif /* DOLTLITE_PROLLY */

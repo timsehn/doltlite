@@ -63,6 +63,21 @@ SELECT * FROM dolt_log;
 -- commit_hash | committer | email | date | message
 ```
 
+### History (dolt_history_&lt;table&gt;)
+
+Time-travel query showing every version of every row across all commits:
+
+```sql
+SELECT * FROM dolt_history_users;
+-- rowid_val | value | commit_hash | committer | commit_date
+
+-- How many times was row 42 changed?
+SELECT count(*) FROM dolt_history_users WHERE rowid_val = 42;
+
+-- What did the table look like at a specific commit?
+SELECT * FROM dolt_history_users WHERE commit_hash = 'abc123...';
+```
+
 ### Diff
 
 Row-level diff between any two commits, or working state vs HEAD:

@@ -92,6 +92,9 @@ jobs:
     - name: Dolt diff audit log tests
       run: cd build && bash ../test/doltlite_diff_table.sh
 
+    - name: Dolt history table tests
+      run: cd build && bash ../test/doltlite_history.sh
+
     - name: Dolt garbage collection tests
       run: cd build && bash ../test/doltlite_gc.sh
 
