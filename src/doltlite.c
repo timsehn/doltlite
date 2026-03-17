@@ -52,6 +52,7 @@ extern void doltliteRegisterConflictTables(sqlite3 *db);
 extern int doltliteTagRegister(sqlite3 *db);
 extern int doltliteGcRegister(sqlite3 *db);
 extern void doltliteRegisterDiffTables(sqlite3 *db);
+extern int doltliteAncestorRegister(sqlite3 *db);
 
 /* From doltlite_ancestor.c */
 extern int doltliteFindAncestor(sqlite3 *db, const ProllyHash *h1,
@@ -451,8 +452,6 @@ static void doltliteCommitFunc(
 ** --soft: unstage everything (staged = HEAD catalog), keep working changes
 ** --hard: reset working state to HEAD, discard all uncommitted changes
 ** -------------------------------------------------------------------------- */
-
-extern int doltliteHardReset(sqlite3 *db, const ProllyHash *catHash);
 
 static void doltliteResetFunc(
   sqlite3_context *context,
@@ -1070,6 +1069,7 @@ void doltliteRegister(sqlite3 *db){
   doltliteConflictsRegister(db);
   doltliteGcRegister(db);
   doltliteRegisterDiffTables(db);
+  doltliteAncestorRegister(db);
 }
 
 #endif /* DOLTLITE_PROLLY */
