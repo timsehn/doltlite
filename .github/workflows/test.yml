@@ -98,6 +98,9 @@ jobs:
     - name: Dolt point-in-time query tests
       run: cd build && bash ../test/doltlite_at.sh
 
+    - name: Dolt schema diff tests
+      run: cd build && bash ../test/doltlite_schema_diff.sh
+
     - name: Dolt garbage collection tests
       run: cd build && bash ../test/doltlite_gc.sh
 
