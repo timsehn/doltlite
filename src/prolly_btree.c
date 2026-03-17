@@ -58,6 +58,7 @@
 /* Forward declarations */
 static void registerDoltiteFunctions(sqlite3 *db);
 void doltliteGetSessionHead(sqlite3 *db, ProllyHash *pHead);
+char *doltliteResolveTableNumber(sqlite3 *db, Pgno iTable);
 
 /* --------------------------------------------------------------------------
 ** Constants and macros
@@ -164,6 +165,7 @@ struct TableEntry {
   Pgno iTable;           /* Logical table number (like SQLite's root page) */
   ProllyHash root;       /* Current root hash of this table's prolly tree */
   u8 flags;              /* BTREE_INTKEY or BTREE_BLOBKEY */
+  char *zName;           /* Table name (owned, NULL for internal tables) */
 };
 
 /* --------------------------------------------------------------------------
@@ -436,10 +438,27 @@ static void refreshCursorRoot(BtCursor *pCur){
 */
 static int serializeCatalog(Btree *pBtree, u8 **ppOut, int *pnOut){
   int nTables = pBtree->nTables;
-  int sz = 4 + 4 + 64 + nTables * 25;
-  u8 *buf = sqlite3_malloc(sz);
-  u8 *q;
+  int sz = 4 + 4 + 64;  /* header */
+  u8 *buf, *q;
   int i;
+
+  /* Populate table names from sqlite_master if missing */
+  if( pBtree->db ){
+    for(i=0; i<nTables; i++){
+      if( !pBtree->aTables[i].zName && pBtree->aTables[i].iTable>1 ){
+        pBtree->aTables[i].zName = doltliteResolveTableNumber(
+            pBtree->db, pBtree->aTables[i].iTable);
+      }
+    }
+  }
+
+  /* Calculate variable size: per table = 4+1+20+2+name_len */
+  for(i=0; i<nTables; i++){
+    int nLen = pBtree->aTables[i].zName ? (int)strlen(pBtree->aTables[i].zName) : 0;
+    sz += 4 + 1 + PROLLY_HASH_SIZE + 2 + nLen;
+  }
+
+  buf = sqlite3_malloc(sz);
   if( !buf ) return SQLITE_NOMEM;
   q = buf;
   /* iNextTable */
@@ -456,18 +475,22 @@ static int serializeCatalog(Btree *pBtree, u8 **ppOut, int *pnOut){
     q[0]=(u8)v; q[1]=(u8)(v>>8); q[2]=(u8)(v>>16); q[3]=(u8)(v>>24);
     q += 4;
   }
-  /* table entries */
+  /* table entries: iTable(4) + flags(1) + root(20) + name_len(2) + name(var) */
   for(i=0; i<nTables; i++){
     struct TableEntry *t = &pBtree->aTables[i];
     u32 pg = t->iTable;
+    int nLen = t->zName ? (int)strlen(t->zName) : 0;
     q[0]=(u8)pg; q[1]=(u8)(pg>>8); q[2]=(u8)(pg>>16); q[3]=(u8)(pg>>24);
     q += 4;
     *q++ = t->flags;
     memcpy(q, t->root.data, PROLLY_HASH_SIZE);
     q += PROLLY_HASH_SIZE;
+    q[0]=(u8)nLen; q[1]=(u8)(nLen>>8); q+=2;
+    if( nLen>0 ) memcpy(q, t->zName, nLen);
+    q += nLen;
   }
   *ppOut = buf;
-  *pnOut = sz;
+  *pnOut = (int)(q - buf);
   return SQLITE_OK;
 }
 
@@ -484,7 +507,6 @@ static int deserializeCatalog(Btree *pBtree, const u8 *data, int nData){
   /* nTables */
   nTables = (int)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
   q += 4;
-  if( nData < 72 + nTables*25 ) return SQLITE_CORRUPT;
   /* meta values */
   for(i=0; i<16; i++){
     pBtree->aMeta[i] = (u32)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
@@ -496,13 +518,30 @@ static int deserializeCatalog(Btree *pBtree, const u8 *data, int nData){
   pBtree->nTables = 0;
   pBtree->nTablesAlloc = 0;
   for(i=0; i<nTables; i++){
-    Pgno iTable = (Pgno)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
+    Pgno iTable;
+    u8 flags;
+    struct TableEntry *pTE;
+    int nLen;
+    if( q+4+1+PROLLY_HASH_SIZE > data+nData ) return SQLITE_CORRUPT;
+    iTable = (Pgno)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
     q += 4;
-    u8 flags = *q++;
-    struct TableEntry *pTE = addTable(pBtree, iTable, flags);
+    flags = *q++;
+    pTE = addTable(pBtree, iTable, flags);
     if( !pTE ) return SQLITE_NOMEM;
     memcpy(pTE->root.data, q, PROLLY_HASH_SIZE);
     q += PROLLY_HASH_SIZE;
+    /* Read name if present (v2 catalog format) */
+    if( q+2 <= data+nData ){
+      nLen = q[0] | (q[1]<<8); q += 2;
+      if( nLen>0 && q+nLen<=data+nData ){
+        pTE->zName = sqlite3_malloc(nLen+1);
+        if( pTE->zName ){
+          memcpy(pTE->zName, q, nLen);
+          pTE->zName[nLen] = 0;
+        }
+        q += nLen;
+      }
+    }
   }
   return SQLITE_OK;
 }

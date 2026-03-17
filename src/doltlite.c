@@ -37,6 +37,7 @@ struct TableEntry {
   Pgno iTable;
   ProllyHash root;
   u8 flags;
+  char *zName;
 };
 extern int doltliteLoadCatalog(sqlite3 *db, const ProllyHash *catHash,
                                struct TableEntry **ppTables, int *pnTables,
@@ -197,11 +198,16 @@ static void doltliteAddFunc(
         /* Get meta from working state (it's the current BtShared meta) */
         /* For simplicity, re-serialize from the staged entries with working's meta */
         {
-          int sz = 4 + 4 + 64 + nStaged * 25;
-          u8 *buf = sqlite3_malloc(sz);
-          u8 *p;
+          int sz = 4 + 4 + 64;
+          u8 *buf, *p;
           ProllyHash newStagedHash;
+          int j;
 
+          for(j=0;j<nStaged;j++){
+            int nl = aStaged[j].zName ? (int)strlen(aStaged[j].zName) : 0;
+            sz += 4+1+PROLLY_HASH_SIZE+2+nl;
+          }
+          buf = sqlite3_malloc(sz);
           if( !buf ){
             sqlite3_free(aWorking);
             sqlite3_free(aStaged);
@@ -209,33 +215,34 @@ static void doltliteAddFunc(
             return;
           }
           p = buf;
-          /* Copy iNextTable and meta from working catalog chunk */
           {
             u8 *wData = 0; int wn = 0;
             rc = chunkStoreGet(cs, &workingHash, &wData, &wn);
             if( rc==SQLITE_OK && wn>=72 ){
-              memcpy(p, wData, 72); /* iNextTable(4) + nTables(4) + meta(64) */
+              memcpy(p, wData, 72);
             }else{
               memset(p, 0, 72);
             }
             sqlite3_free(wData);
           }
-          /* Override nTables */
           p[4]=(u8)nStaged; p[5]=(u8)(nStaged>>8);
           p[6]=(u8)(nStaged>>16); p[7]=(u8)(nStaged>>24);
           p += 72;
 
-          /* Write table entries */
           for(i=0; i<nStaged; i++){
             Pgno pg = aStaged[i].iTable;
+            int nl = aStaged[i].zName ? (int)strlen(aStaged[i].zName) : 0;
             p[0]=(u8)pg; p[1]=(u8)(pg>>8); p[2]=(u8)(pg>>16); p[3]=(u8)(pg>>24);
             p += 4;
             *p++ = aStaged[i].flags;
             memcpy(p, aStaged[i].root.data, PROLLY_HASH_SIZE);
             p += PROLLY_HASH_SIZE;
+            p[0]=(u8)nl; p[1]=(u8)(nl>>8); p+=2;
+            if(nl>0) memcpy(p, aStaged[i].zName, nl);
+            p += nl;
           }
 
-          rc = chunkStorePut(cs, buf, sz, &newStagedHash);
+          rc = chunkStorePut(cs, buf, (int)(p-buf), &newStagedHash);
           sqlite3_free(buf);
           if( rc==SQLITE_OK ){
             doltliteSetSessionStaged(db, &newStagedHash); chunkStoreSetStagedCatalog(cs, &newStagedHash);

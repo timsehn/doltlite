@@ -72,6 +72,33 @@ run_test "pre_merge_rows" "SELECT count(*) FROM t;" "2" "$DB5"
 run_test_match "merge_del" "SELECT dolt_merge('feature');" "^[0-9a-f]{40}$" "$DB5"
 run_test "post_merge_rows" "SELECT count(*) FROM t;" "1" "$DB5"
 
+# Test 8: dolt_diff after three-way merge (DB from Test 1)
+# The merge commit is HEAD (offset 0), ancestor is 2 commits back (offset 2 = "initial")
+# Between ancestor and merged result, users table should show 'Alice'->'ALICE', orders should show added row
+run_test_match "diff_3way_users" \
+  "SELECT diff_type, from_value, to_value FROM dolt_diff('users', (SELECT commit_hash FROM dolt_log LIMIT 1 OFFSET 2), (SELECT commit_hash FROM dolt_log LIMIT 1 OFFSET 0));" \
+  "modified" "$DB"
+run_test_match "diff_3way_orders" \
+  "SELECT diff_type FROM dolt_diff('orders', (SELECT commit_hash FROM dolt_log LIMIT 1 OFFSET 2), (SELECT commit_hash FROM dolt_log LIMIT 1 OFFSET 0));" \
+  "added" "$DB"
+
+# Test 9: dolt_diff after fast-forward merge (DB2 from Test 2)
+# Old HEAD was "init" (offset 1), new HEAD is "feature" (offset 0)
+# Should show the added row (x=2)
+run_test_match "diff_ff_added" \
+  "SELECT diff_type, to_value FROM dolt_diff('t', (SELECT commit_hash FROM dolt_log LIMIT 1 OFFSET 1), (SELECT commit_hash FROM dolt_log LIMIT 1 OFFSET 0));" \
+  "added" "$DB2"
+
+# Test 10: dolt_diff between main and feature for conflict scenario (DB3 from Test 4)
+# Main is at HEAD, feature tip is its own commit. Compare ancestor (offset 1 on main = init) to main HEAD.
+# Main changed v from 'a' to 'main' - row id=1 was modified
+run_test "diff_conflict_main_type" \
+  "SELECT diff_type FROM dolt_diff('t', (SELECT commit_hash FROM dolt_log LIMIT 1 OFFSET 1), (SELECT commit_hash FROM dolt_log LIMIT 1 OFFSET 0));" \
+  "modified" "$DB3"
+run_test "diff_conflict_main_rowid" \
+  "SELECT rowid_val FROM dolt_diff('t', (SELECT commit_hash FROM dolt_log LIMIT 1 OFFSET 1), (SELECT commit_hash FROM dolt_log LIMIT 1 OFFSET 0));" \
+  "1" "$DB3"
+
 rm -f "$DB" "$DB2" "$DB3" "$DB4" "$DB5"
 echo ""
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
