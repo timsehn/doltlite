@@ -166,6 +166,8 @@ static void csSerializeManifest(const ChunkStore *cs, u8 *aBuf){
   CS_WRITE_U32(aBuf + 40, (u32)cs->nIndexSize);
   /* bytes 44..63: catalog hash (table registry + meta) */
   memcpy(aBuf + 44, cs->catalog.data, PROLLY_HASH_SIZE);
+  /* bytes 64..83: head commit hash (v2+) */
+  memcpy(aBuf + 64, cs->headCommit.data, PROLLY_HASH_SIZE);
 }
 
 /* --------------------------------------------------------------------
@@ -213,6 +215,7 @@ static int csReadManifest(ChunkStore *cs){
   cs->iIndexOffset = CS_READ_I64(aBuf + 32);
   cs->nIndexSize = (int)CS_READ_U32(aBuf + 40);
   memcpy(cs->catalog.data, aBuf + 44, PROLLY_HASH_SIZE);
+  memcpy(cs->headCommit.data, aBuf + 64, PROLLY_HASH_SIZE);
 
   return SQLITE_OK;
 }
@@ -516,6 +519,14 @@ void chunkStoreGetCatalog(ChunkStore *cs, ProllyHash *pCat){
 
 void chunkStoreSetCatalog(ChunkStore *cs, const ProllyHash *pCat){
   memcpy(&cs->catalog, pCat, sizeof(ProllyHash));
+}
+
+void chunkStoreGetHeadCommit(ChunkStore *cs, ProllyHash *pHead){
+  memcpy(pHead, &cs->headCommit, sizeof(ProllyHash));
+}
+
+void chunkStoreSetHeadCommit(ChunkStore *cs, const ProllyHash *pHead){
+  memcpy(&cs->headCommit, pHead, sizeof(ProllyHash));
 }
 
 /*
@@ -828,6 +839,7 @@ int chunkStoreCommit(ChunkStore *cs){
     memset(&tmp, 0, sizeof(tmp));
     memcpy(&tmp.root, &cs->root, sizeof(ProllyHash));
     memcpy(&tmp.catalog, &cs->catalog, sizeof(ProllyHash));
+    memcpy(&tmp.headCommit, &cs->headCommit, sizeof(ProllyHash));
     tmp.nChunks = nMerged;
     tmp.iIndexOffset = writePos;
     tmp.nIndexSize = indexBufSize;

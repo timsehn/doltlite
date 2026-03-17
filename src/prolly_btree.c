@@ -2693,9 +2693,49 @@ static void doltiteEngineFunc(
   sqlite3_result_text(context, "prolly", -1, SQLITE_STATIC);
 }
 
+/*
+** Get the ChunkStore for a database connection.
+** Used by doltlite_commit.c and doltlite_log.c.
+*/
+ChunkStore *doltliteGetChunkStore(sqlite3 *db){
+  if( db && db->nDb>0 && db->aDb[0].pBt ){
+    Btree *pBt = db->aDb[0].pBt;
+    return &pBt->pBt->store;
+  }
+  return 0;
+}
+
+/*
+** Get the BtShared for a database connection.
+** Used by doltlite_commit.c for flushing and catalog serialization.
+*/
+BtShared *doltliteGetBtShared(sqlite3 *db){
+  if( db && db->nDb>0 && db->aDb[0].pBt ){
+    return db->aDb[0].pBt->pBt;
+  }
+  return 0;
+}
+
+/*
+** Flush all pending mutations and serialize catalog.
+** Called by dolt_commit before snapshotting state.
+*/
+int doltliteFlushAndSerializeCatalog(sqlite3 *db, u8 **ppOut, int *pnOut){
+  BtShared *pBt = doltliteGetBtShared(db);
+  int rc;
+  if( !pBt ) return SQLITE_ERROR;
+  rc = flushAllPending(pBt, 0);
+  if( rc!=SQLITE_OK ) return rc;
+  return serializeCatalog(pBt, ppOut, pnOut);
+}
+
+/* External registration for all dolt features */
+extern void doltliteRegister(sqlite3 *db);
+
 static void registerDoltiteFunctions(sqlite3 *db){
   sqlite3_create_function(db, "doltite_engine", 0, SQLITE_UTF8, 0,
                           doltiteEngineFunc, 0, 0);
+  doltliteRegister(db);
 }
 
 #endif /* DOLTLITE_PROLLY */
