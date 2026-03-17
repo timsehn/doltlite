@@ -53,6 +53,7 @@ extern int doltliteTagRegister(sqlite3 *db);
 extern int doltliteGcRegister(sqlite3 *db);
 extern void doltliteRegisterDiffTables(sqlite3 *db);
 extern int doltliteAncestorRegister(sqlite3 *db);
+extern int doltliteAtRegister(sqlite3 *db);
 extern void doltliteRegisterHistoryTables(sqlite3 *db);
 
 /* From doltlite_ancestor.c */
@@ -1072,6 +1073,7 @@ void doltliteRegister(sqlite3 *db){
   doltliteGcRegister(db);
   doltliteRegisterDiffTables(db);
   doltliteAncestorRegister(db);
+  doltliteAtRegister(db);
   doltliteRegisterHistoryTables(db);
 }
 
