@@ -50,6 +50,88 @@ SELECT doltlite_engine();
 -- returns: prolly
 ```
 
+## Dolt Features
+
+Doltlite exposes version control operations as SQL functions and system tables.
+
+### dolt_commit
+
+Create a versioning commit.
+
+```sql
+SELECT dolt_commit('-A', '-m', 'Initial schema and data');
+SELECT dolt_commit('-m', 'Commit staged changes only');
+```
+
+### dolt_add
+
+Stage tables for commit.
+
+```sql
+SELECT dolt_add('users');     -- stage one table
+SELECT dolt_add('-A');        -- stage all changes
+```
+
+### dolt_status
+
+View staged and unstaged changes.
+
+```sql
+SELECT * FROM dolt_status;
+-- table_name | staged | status
+-- users      | 1      | modified
+-- orders     | 0      | new table
+```
+
+### dolt_log
+
+View commit history.
+
+```sql
+SELECT * FROM dolt_log;
+-- commit_hash | committer | email | date | message
+```
+
+### dolt_diff
+
+Row-level diff between commits or working vs HEAD.
+
+```sql
+SELECT * FROM dolt_diff('users');
+SELECT * FROM dolt_diff('users', 'abc123...', 'def456...');
+-- diff_type | rowid_val | from_value | to_value
+```
+
+### dolt_reset
+
+Undo staged or working changes.
+
+```sql
+SELECT dolt_reset('--soft');   -- unstage all changes
+SELECT dolt_reset('--hard');   -- discard all uncommitted changes
+```
+
+### Complete Workflow
+
+```sql
+CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT);
+INSERT INTO users VALUES(1, 'Alice');
+SELECT dolt_commit('-A', '-m', 'Initial commit');
+
+INSERT INTO users VALUES(2, 'Bob');
+SELECT * FROM dolt_status;        -- users | 0 | modified
+SELECT dolt_add('users');
+SELECT dolt_commit('-m', 'Add Bob');
+
+SELECT * FROM dolt_diff('users',
+  (SELECT commit_hash FROM dolt_log LIMIT 1 OFFSET 1),
+  (SELECT commit_hash FROM dolt_log LIMIT 1));
+-- added | 2 | NULL | <blob>
+
+SELECT * FROM dolt_log;
+-- two commits shown
+```
+
 ## Status
 
 - 8,500+ lines of new C code across 23 files
