@@ -34,10 +34,11 @@ extern int doltliteLoadCatalog(sqlite3 *db, const ProllyHash *catHash,
                                struct TableEntry **ppTables, int *pnTables,
                                Pgno *piNextTable);
 
-/* Provided by doltlite_log.c, doltlite_status.c, doltlite_diff.c */
+/* Provided by other doltlite_*.c files */
 extern int doltliteLogRegister(sqlite3 *db);
 extern int doltliteStatusRegister(sqlite3 *db);
 extern int doltliteDiffRegister(sqlite3 *db);
+extern int doltliteBranchRegister(sqlite3 *db);
 
 /* --------------------------------------------------------------------------
 ** dolt_add('tablename') or dolt_add('-A')
@@ -372,8 +373,22 @@ static void doltliteCommitFunc(
 
   /* Update HEAD and staged. Do NOT overwrite the working catalog (cs->catalog)
   ** — it represents the live database state which may have unstaged changes. */
-  chunkStoreSetHeadCommit(cs, &commitHash);
+  chunkStoreSetHeadCommit(cs, &commitHash); /* Also updates current branch ref */
   chunkStoreSetStagedCatalog(cs, &catalogHash); /* staged = HEAD after commit */
+
+  /* Bootstrap "main" branch on first commit if no branches exist */
+  if( cs->nBranches==0 ){
+    chunkStoreAddBranch(cs, "main", &commitHash);
+    chunkStoreSetCurrentBranch(cs, "main");
+  }
+
+  /* Serialize refs chunk with updated branch pointer */
+  rc = chunkStoreSerializeRefs(cs);
+  if( rc!=SQLITE_OK ){
+    sqlite3_result_error_code(context, rc);
+    return;
+  }
+
   rc = chunkStoreCommit(cs);
   if( rc!=SQLITE_OK ){
     sqlite3_result_error_code(context, rc);
@@ -463,6 +478,7 @@ void doltliteRegister(sqlite3 *db){
   doltliteLogRegister(db);
   doltliteStatusRegister(db);
   doltliteDiffRegister(db);
+  doltliteBranchRegister(db);
 }
 
 #endif /* DOLTLITE_PROLLY */

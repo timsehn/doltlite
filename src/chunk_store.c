@@ -74,6 +74,7 @@ static int csOpenFile(sqlite3_vfs *pVfs, const char *zPath,
 static void csCloseFile(sqlite3_file *pFile);
 static int csReadManifest(ChunkStore *cs);
 static int csReadIndex(ChunkStore *cs);
+static int csDeserializeRefs(ChunkStore *cs, const u8 *data, int nData);
 static int csSearchIndex(const ChunkIndexEntry *aIdx, int nIdx,
                          const ProllyHash *pHash);
 static int csSearchPending(ChunkStore *cs, const ProllyHash *pHash);
@@ -166,8 +167,8 @@ static void csSerializeManifest(const ChunkStore *cs, u8 *aBuf){
   CS_WRITE_U32(aBuf + 40, (u32)cs->nIndexSize);
   /* bytes 44..63: catalog hash (table registry + meta) */
   memcpy(aBuf + 44, cs->catalog.data, PROLLY_HASH_SIZE);
-  /* bytes 64..83: head commit hash */
-  memcpy(aBuf + 64, cs->headCommit.data, PROLLY_HASH_SIZE);
+  /* bytes 64..83: refs hash (branch → commit mapping) */
+  memcpy(aBuf + 64, cs->refsHash.data, PROLLY_HASH_SIZE);
   /* bytes 84..103: staged catalog hash */
   memcpy(aBuf + 84, cs->stagedCatalog.data, PROLLY_HASH_SIZE);
 }
@@ -217,7 +218,7 @@ static int csReadManifest(ChunkStore *cs){
   cs->iIndexOffset = CS_READ_I64(aBuf + 32);
   cs->nIndexSize = (int)CS_READ_U32(aBuf + 40);
   memcpy(cs->catalog.data, aBuf + 44, PROLLY_HASH_SIZE);
-  memcpy(cs->headCommit.data, aBuf + 64, PROLLY_HASH_SIZE);
+  memcpy(cs->refsHash.data, aBuf + 64, PROLLY_HASH_SIZE);
   memcpy(cs->stagedCatalog.data, aBuf + 84, PROLLY_HASH_SIZE);
 
   return SQLITE_OK;
@@ -461,6 +462,28 @@ int chunkStoreOpen(
       return rc;
     }
 
+    /* Load refs chunk if present */
+    if( !prollyHashIsEmpty(&cs->refsHash) ){
+      u8 *refsData = 0;
+      int nRefsData = 0;
+      rc = chunkStoreGet(cs, &cs->refsHash, &refsData, &nRefsData);
+      if( rc==SQLITE_OK ){
+        rc = csDeserializeRefs(cs, refsData, nRefsData);
+        sqlite3_free(refsData);
+      }
+      if( rc!=SQLITE_OK ){
+        csCloseFile(cs->pFile);
+        cs->pFile = 0;
+        sqlite3_free(cs->zFilename);
+        cs->zFilename = 0;
+        return rc;
+      }
+    }else{
+      /* No refs yet — default to "main" branch */
+      cs->zCurrentBranch = sqlite3_mprintf("main");
+      memset(&cs->headCommit, 0, sizeof(ProllyHash));
+    }
+
     /* Set append offset: right after the last chunk, before the index.
     ** If there is no index yet, append after the manifest. */
     if( cs->iIndexOffset > 0 ){
@@ -498,6 +521,9 @@ int chunkStoreClose(ChunkStore *cs){
   sqlite3_free(cs->aIndex);
   sqlite3_free(cs->aPending);
   sqlite3_free(cs->pWriteBuf);
+  sqlite3_free(cs->zCurrentBranch);
+  { int i; for(i=0; i<cs->nBranches; i++) sqlite3_free(cs->aBranches[i].zName); }
+  sqlite3_free(cs->aBranches);
   memset(cs, 0, sizeof(*cs));
   return SQLITE_OK;
 }
@@ -529,7 +555,17 @@ void chunkStoreGetHeadCommit(ChunkStore *cs, ProllyHash *pHead){
 }
 
 void chunkStoreSetHeadCommit(ChunkStore *cs, const ProllyHash *pHead){
+  int i;
   memcpy(&cs->headCommit, pHead, sizeof(ProllyHash));
+  /* Also update the current branch's ref */
+  if( cs->zCurrentBranch ){
+    for(i=0; i<cs->nBranches; i++){
+      if( strcmp(cs->aBranches[i].zName, cs->zCurrentBranch)==0 ){
+        memcpy(&cs->aBranches[i].commitHash, pHead, sizeof(ProllyHash));
+        break;
+      }
+    }
+  }
 }
 
 void chunkStoreGetStagedCatalog(ChunkStore *cs, ProllyHash *pStaged){
@@ -538,6 +574,149 @@ void chunkStoreGetStagedCatalog(ChunkStore *cs, ProllyHash *pStaged){
 
 void chunkStoreSetStagedCatalog(ChunkStore *cs, const ProllyHash *pStaged){
   memcpy(&cs->stagedCatalog, pStaged, sizeof(ProllyHash));
+}
+
+/* ---- Branch management ---- */
+
+const char *chunkStoreGetCurrentBranch(ChunkStore *cs){
+  return cs->zCurrentBranch ? cs->zCurrentBranch : "main";
+}
+
+int chunkStoreSetCurrentBranch(ChunkStore *cs, const char *zName){
+  sqlite3_free(cs->zCurrentBranch);
+  cs->zCurrentBranch = sqlite3_mprintf("%s", zName);
+  return cs->zCurrentBranch ? SQLITE_OK : SQLITE_NOMEM;
+}
+
+int chunkStoreFindBranch(ChunkStore *cs, const char *zName, ProllyHash *pCommit){
+  int i;
+  for(i=0; i<cs->nBranches; i++){
+    if( strcmp(cs->aBranches[i].zName, zName)==0 ){
+      if( pCommit ) memcpy(pCommit, &cs->aBranches[i].commitHash, sizeof(ProllyHash));
+      return SQLITE_OK;
+    }
+  }
+  return SQLITE_NOTFOUND;
+}
+
+int chunkStoreAddBranch(ChunkStore *cs, const char *zName, const ProllyHash *pCommit){
+  struct BranchRef *aNew;
+  if( chunkStoreFindBranch(cs, zName, 0)==SQLITE_OK ){
+    return SQLITE_ERROR; /* Already exists */
+  }
+  aNew = sqlite3_realloc(cs->aBranches, (cs->nBranches+1)*(int)sizeof(struct BranchRef));
+  if( !aNew ) return SQLITE_NOMEM;
+  cs->aBranches = aNew;
+  aNew[cs->nBranches].zName = sqlite3_mprintf("%s", zName);
+  if( !aNew[cs->nBranches].zName ) return SQLITE_NOMEM;
+  memcpy(&aNew[cs->nBranches].commitHash, pCommit, sizeof(ProllyHash));
+  cs->nBranches++;
+  return SQLITE_OK;
+}
+
+int chunkStoreDeleteBranch(ChunkStore *cs, const char *zName){
+  int i;
+  for(i=0; i<cs->nBranches; i++){
+    if( strcmp(cs->aBranches[i].zName, zName)==0 ){
+      sqlite3_free(cs->aBranches[i].zName);
+      cs->aBranches[i] = cs->aBranches[cs->nBranches-1];
+      cs->nBranches--;
+      return SQLITE_OK;
+    }
+  }
+  return SQLITE_NOTFOUND;
+}
+
+/*
+** Serialize refs chunk format:
+**   [version:1][current_name_len:2][current_name:var]
+**   [num_branches:2]
+**   per branch: [name_len:2][name:var][commit_hash:20]
+*/
+int chunkStoreSerializeRefs(ChunkStore *cs){
+  int sz, i, rc;
+  u8 *buf, *p;
+  const char *cur = cs->zCurrentBranch ? cs->zCurrentBranch : "main";
+  int curLen = (int)strlen(cur);
+  ProllyHash refsHash;
+
+  /* Calculate size */
+  sz = 1 + 2 + curLen + 2;
+  for(i=0; i<cs->nBranches; i++){
+    sz += 2 + (int)strlen(cs->aBranches[i].zName) + PROLLY_HASH_SIZE;
+  }
+
+  buf = sqlite3_malloc(sz);
+  if( !buf ) return SQLITE_NOMEM;
+  p = buf;
+
+  *p++ = 1; /* version */
+  p[0]=(u8)curLen; p[1]=(u8)(curLen>>8); p+=2;
+  memcpy(p, cur, curLen); p+=curLen;
+  p[0]=(u8)cs->nBranches; p[1]=(u8)(cs->nBranches>>8); p+=2;
+  for(i=0; i<cs->nBranches; i++){
+    int nLen = (int)strlen(cs->aBranches[i].zName);
+    p[0]=(u8)nLen; p[1]=(u8)(nLen>>8); p+=2;
+    memcpy(p, cs->aBranches[i].zName, nLen); p+=nLen;
+    memcpy(p, cs->aBranches[i].commitHash.data, PROLLY_HASH_SIZE); p+=PROLLY_HASH_SIZE;
+  }
+
+  rc = chunkStorePut(cs, buf, sz, &refsHash);
+  sqlite3_free(buf);
+  if( rc!=SQLITE_OK ) return rc;
+
+  memcpy(&cs->refsHash, &refsHash, sizeof(ProllyHash));
+  return SQLITE_OK;
+}
+
+static int csDeserializeRefs(ChunkStore *cs, const u8 *data, int nData){
+  const u8 *p = data;
+  int curLen, nBranches, i;
+
+  if( nData<5 ) return SQLITE_CORRUPT;
+  if( *p++!=1 ) return SQLITE_CORRUPT; /* version */
+
+  curLen = p[0] | (p[1]<<8); p+=2;
+  if( p+curLen > data+nData ) return SQLITE_CORRUPT;
+  sqlite3_free(cs->zCurrentBranch);
+  cs->zCurrentBranch = sqlite3_malloc(curLen+1);
+  if( !cs->zCurrentBranch ) return SQLITE_NOMEM;
+  memcpy(cs->zCurrentBranch, p, curLen);
+  cs->zCurrentBranch[curLen] = 0;
+  p += curLen;
+
+  nBranches = p[0] | (p[1]<<8); p+=2;
+
+  /* Free old branches */
+  for(i=0; i<cs->nBranches; i++) sqlite3_free(cs->aBranches[i].zName);
+  sqlite3_free(cs->aBranches);
+  cs->aBranches = 0;
+  cs->nBranches = 0;
+
+  if( nBranches>0 ){
+    cs->aBranches = sqlite3_malloc(nBranches * (int)sizeof(struct BranchRef));
+    if( !cs->aBranches ) return SQLITE_NOMEM;
+    for(i=0; i<nBranches; i++){
+      int nLen;
+      if( p+2 > data+nData ) return SQLITE_CORRUPT;
+      nLen = p[0] | (p[1]<<8); p+=2;
+      if( p+nLen+PROLLY_HASH_SIZE > data+nData ) return SQLITE_CORRUPT;
+      cs->aBranches[i].zName = sqlite3_malloc(nLen+1);
+      if( !cs->aBranches[i].zName ) return SQLITE_NOMEM;
+      memcpy(cs->aBranches[i].zName, p, nLen);
+      cs->aBranches[i].zName[nLen] = 0;
+      p += nLen;
+      memcpy(cs->aBranches[i].commitHash.data, p, PROLLY_HASH_SIZE);
+      p += PROLLY_HASH_SIZE;
+      cs->nBranches++;
+    }
+  }
+
+  /* Resolve headCommit from current branch */
+  memset(&cs->headCommit, 0, sizeof(ProllyHash));
+  chunkStoreFindBranch(cs, cs->zCurrentBranch, &cs->headCommit);
+
+  return SQLITE_OK;
 }
 
 /*
@@ -850,7 +1029,7 @@ int chunkStoreCommit(ChunkStore *cs){
     memset(&tmp, 0, sizeof(tmp));
     memcpy(&tmp.root, &cs->root, sizeof(ProllyHash));
     memcpy(&tmp.catalog, &cs->catalog, sizeof(ProllyHash));
-    memcpy(&tmp.headCommit, &cs->headCommit, sizeof(ProllyHash));
+    memcpy(&tmp.refsHash, &cs->refsHash, sizeof(ProllyHash));
     memcpy(&tmp.stagedCatalog, &cs->stagedCatalog, sizeof(ProllyHash));
     tmp.nChunks = nMerged;
     tmp.iIndexOffset = writePos;

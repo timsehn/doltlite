@@ -21,7 +21,7 @@
 
 /* Manifest magic */
 #define CHUNK_STORE_MAGIC 0x444C5443  /* "DLTC" */
-#define CHUNK_STORE_VERSION 3
+#define CHUNK_STORE_VERSION 4
 #define CHUNK_MANIFEST_SIZE 104
 #define CHUNK_INDEX_ENTRY_SIZE 32
 
@@ -40,8 +40,19 @@ struct ChunkStore {
   sqlite3_vfs *pVfs;         /* VFS for file operations */
   ProllyHash root;           /* Current root hash */
   ProllyHash catalog;        /* Catalog hash (table registry + meta) */
-  ProllyHash headCommit;     /* HEAD commit hash (linked list of commits) */
+  ProllyHash refsHash;       /* Hash of the refs chunk (branch → commit mapping) */
   ProllyHash stagedCatalog;  /* Staged catalog (tables added via dolt_add) */
+
+  /* Resolved from refs chunk */
+  ProllyHash headCommit;     /* Current branch's commit hash (cached) */
+  char *zCurrentBranch;      /* Current branch name (owned, sqlite3_free) */
+
+  /* In-memory branch table (loaded from refs chunk) */
+  struct BranchRef {
+    char *zName;
+    ProllyHash commitHash;
+  } *aBranches;
+  int nBranches;
   int nChunks;               /* Number of chunks in store */
   i64 iIndexOffset;          /* File offset of chunk index */
   int nIndexSize;            /* Size of chunk index in bytes */
@@ -80,13 +91,21 @@ void chunkStoreSetRoot(ChunkStore *cs, const ProllyHash *pRoot);
 void chunkStoreGetCatalog(ChunkStore *cs, ProllyHash *pCat);
 void chunkStoreSetCatalog(ChunkStore *cs, const ProllyHash *pCat);
 
-/* Get/set the HEAD commit hash */
+/* Get/set the HEAD commit hash (resolved from current branch) */
 void chunkStoreGetHeadCommit(ChunkStore *cs, ProllyHash *pHead);
 void chunkStoreSetHeadCommit(ChunkStore *cs, const ProllyHash *pHead);
 
 /* Get/set the staged catalog hash */
 void chunkStoreGetStagedCatalog(ChunkStore *cs, ProllyHash *pStaged);
 void chunkStoreSetStagedCatalog(ChunkStore *cs, const ProllyHash *pStaged);
+
+/* Branch management */
+const char *chunkStoreGetCurrentBranch(ChunkStore *cs);
+int chunkStoreSetCurrentBranch(ChunkStore *cs, const char *zName);
+int chunkStoreAddBranch(ChunkStore *cs, const char *zName, const ProllyHash *pCommit);
+int chunkStoreDeleteBranch(ChunkStore *cs, const char *zName);
+int chunkStoreFindBranch(ChunkStore *cs, const char *zName, ProllyHash *pCommit);
+int chunkStoreSerializeRefs(ChunkStore *cs);  /* Serialize refs + store + update refsHash */
 
 /* Check if a chunk exists */
 int chunkStoreHas(ChunkStore *cs, const ProllyHash *hash);
