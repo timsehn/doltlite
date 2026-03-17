@@ -24,6 +24,7 @@ struct TableEntry {
   Pgno iTable;
   ProllyHash root;
   u8 flags;
+  char *zName;
 };
 extern int doltliteLoadCatalog(sqlite3 *db, const ProllyHash *catHash,
                                struct TableEntry **ppTables, int *pnTables,

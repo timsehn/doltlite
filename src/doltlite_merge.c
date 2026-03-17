@@ -24,6 +24,7 @@ struct TableEntry {
   Pgno iTable;
   ProllyHash root;
   u8 flags;
+  char *zName;
 };
 
 /* Provided by prolly_btree.c */
@@ -49,6 +50,25 @@ static struct TableEntry *findTableEntry(
 }
 
 /*
+** Find a table entry by NAME. This is the primary merge key —
+** two branches may have different iTable numbers for the same table.
+*/
+static struct TableEntry *findTableByName(
+  struct TableEntry *aEntries,
+  int nEntries,
+  const char *zName
+){
+  int i;
+  if( !zName ) return 0;
+  for(i=0; i<nEntries; i++){
+    if( aEntries[i].zName && strcmp(aEntries[i].zName, zName)==0 ){
+      return &aEntries[i];
+    }
+  }
+  return 0;
+}
+
+/*
 ** Serialize a merged catalog into a chunk and store it.
 **
 ** Format: iNextTable(4) + nTables(4) + meta(64) + entries(25 each)
@@ -65,7 +85,11 @@ static int serializeMergedCatalog(
   ProllyHash *pOutHash               /* OUT: hash of stored catalog chunk */
 ){
   ChunkStore *cs = doltliteGetChunkStore(db);
-  int sz = 4 + 4 + 64 + nMerged * 25;
+  int sz = 4 + 4 + 64;
+  { int j; for(j=0;j<nMerged;j++){
+    int nl = aMerged[j].zName ? (int)strlen(aMerged[j].zName) : 0;
+    sz += 4+1+PROLLY_HASH_SIZE+2+nl;
+  }}
   u8 *buf;
   u8 *p;
   int rc;
@@ -101,11 +125,12 @@ static int serializeMergedCatalog(
 
   p += 72;
 
-  /* Write table entries */
+  /* Write table entries: iTable(4) + flags(1) + root(20) + name_len(2) + name(var) */
   {
     int i;
     for(i=0; i<nMerged; i++){
       Pgno pg = aMerged[i].iTable;
+      int nl = aMerged[i].zName ? (int)strlen(aMerged[i].zName) : 0;
       p[0] = (u8)pg;
       p[1] = (u8)(pg>>8);
       p[2] = (u8)(pg>>16);
@@ -114,6 +139,9 @@ static int serializeMergedCatalog(
       *p++ = aMerged[i].flags;
       memcpy(p, aMerged[i].root.data, PROLLY_HASH_SIZE);
       p += PROLLY_HASH_SIZE;
+      p[0]=(u8)nl; p[1]=(u8)(nl>>8); p+=2;
+      if(nl>0) memcpy(p, aMerged[i].zName, nl);
+      p += nl;
     }
   }
 
@@ -172,86 +200,101 @@ int doltliteMergeCatalogs(
   iNextMerged = iNextOurs > iNextTheirs ? iNextOurs : iNextTheirs;
 
   /*
-  ** Process tables from "ours":
-  ** For each table in ours, determine if it was added, modified, or
-  ** unchanged relative to ancestor, then check for conflicts with theirs.
+  ** NAME-BASED THREE-WAY MERGE
+  **
+  ** Tables are matched by NAME (zName), not by iTable number.
+  ** This handles the case where two branches independently CREATE TABLE
+  ** and get different iTable numbers for tables with different names.
+  **
+  ** Output uses ours' iTable numbers. Theirs' tables that don't exist
+  ** in ours get new iTable numbers from iNextMerged.
   */
+
+  /* Pass 1: Process all tables from "ours" */
   for(i=0; i<nOurs; i++){
-    Pgno iTable = aOurs[i].iTable;
-    struct TableEntry *ancEntry = findTableEntry(aAnc, nAnc, iTable);
-    struct TableEntry *theirsEntry = findTableEntry(aTheirs, nTheirs, iTable);
+    const char *zName = aOurs[i].zName;
+    struct TableEntry *ancEntry;
+    struct TableEntry *theirsEntry;
+
+    /* Skip internal tables (no name, or table 1 = sqlite_master) */
+    if( aOurs[i].iTable<=1 || !zName ){
+      aMerged[nMerged++] = aOurs[i];
+      continue;
+    }
+
+    /* Find by NAME in ancestor and theirs */
+    ancEntry = findTableByName(aAnc, nAnc, zName);
+    theirsEntry = findTableByName(aTheirs, nTheirs, zName);
 
     if( !ancEntry ){
-      /* Table added in ours (not in ancestor) */
+      /* Table added in ours (not in ancestor by name) */
       if( theirsEntry ){
-        /* Also added in theirs — conflict if different */
+        /* Both sides added a table with the same name */
         if( prollyHashCompare(&aOurs[i].root, &theirsEntry->root)!=0 ){
-          rc = SQLITE_ERROR; /* conflict: both sides added same table differently */
+          /* Different content — conflict */
+          rc = SQLITE_ERROR;
           goto merge_cleanup;
         }
-        /* Both added identically — include once */
+        /* Identical content — include once (ours' iTable) */
       }
-      /* Include from ours */
       aMerged[nMerged++] = aOurs[i];
     }else{
       /* Table existed in ancestor */
       int oursChanged = prollyHashCompare(&aOurs[i].root, &ancEntry->root)!=0;
 
       if( !theirsEntry ){
-        /* Deleted in theirs */
+        /* Deleted in theirs (by name) */
         if( oursChanged ){
-          /* Modified in ours, deleted in theirs — conflict */
-          rc = SQLITE_ERROR;
+          rc = SQLITE_ERROR;  /* Modified in ours, deleted in theirs */
           goto merge_cleanup;
         }
-        /* Unchanged in ours, deleted in theirs — delete (skip it) */
+        /* Unchanged in ours, deleted in theirs — delete (skip) */
       }else{
-        /* Present in all three */
         int theirsChanged = prollyHashCompare(&theirsEntry->root, &ancEntry->root)!=0;
-
         if( oursChanged && theirsChanged ){
-          /* Both sides modified the same table — conflict */
-          rc = SQLITE_ERROR;
+          rc = SQLITE_ERROR;  /* Both modified same table — conflict */
           goto merge_cleanup;
         }else if( theirsChanged ){
-          /* Only theirs changed — take theirs */
-          aMerged[nMerged++] = *theirsEntry;
+          /* Take theirs' root but with ours' iTable number */
+          struct TableEntry merged = aOurs[i];
+          memcpy(&merged.root, &theirsEntry->root, sizeof(ProllyHash));
+          aMerged[nMerged++] = merged;
         }else{
-          /* Only ours changed, or neither changed — take ours */
           aMerged[nMerged++] = aOurs[i];
         }
       }
     }
   }
 
-  /*
-  ** Process tables from "theirs" that are NOT in "ours":
-  ** These are either new additions from theirs or tables that were deleted
-  ** in ours but still exist in theirs.
-  */
+  /* Pass 2: Add tables from "theirs" that don't exist in "ours" by name */
   for(i=0; i<nTheirs; i++){
-    Pgno iTable = aTheirs[i].iTable;
-    struct TableEntry *oursEntry = findTableEntry(aOurs, nOurs, iTable);
+    const char *zName = aTheirs[i].zName;
+    struct TableEntry *oursEntry;
 
-    if( !oursEntry ){
-      /* Not in ours — either added in theirs or deleted in ours */
-      struct TableEntry *ancEntry = findTableEntry(aAnc, nAnc, iTable);
+    if( aTheirs[i].iTable<=1 || !zName ) continue;
 
+    oursEntry = findTableByName(aOurs, nOurs, zName);
+    if( oursEntry ) continue;  /* Already handled in pass 1 */
+
+    {
+      struct TableEntry *ancEntry = findTableByName(aAnc, nAnc, zName);
       if( !ancEntry ){
-        /* Added in theirs only (already handled if also in ours above) */
-        aMerged[nMerged++] = aTheirs[i];
+        /* Added in theirs only — assign a new iTable number */
+        struct TableEntry newEntry = aTheirs[i];
+        newEntry.iTable = iNextMerged++;
+        /* Copy name string */
+        newEntry.zName = sqlite3_mprintf("%s", zName);
+        aMerged[nMerged++] = newEntry;
       }else{
         /* Was in ancestor, deleted in ours */
         int theirsChanged = prollyHashCompare(&aTheirs[i].root, &ancEntry->root)!=0;
         if( theirsChanged ){
-          /* Modified in theirs, deleted in ours — conflict */
-          rc = SQLITE_ERROR;
+          rc = SQLITE_ERROR;  /* Modified in theirs, deleted in ours */
           goto merge_cleanup;
         }
-        /* Unchanged in theirs, deleted in ours — delete (skip it) */
+        /* Unchanged in theirs, deleted in ours — delete (skip) */
       }
     }
-    /* If oursEntry exists, we already handled this table in the ours loop */
   }
 
   /* Serialize the merged catalog */
