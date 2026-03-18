@@ -126,9 +126,9 @@ run_test_match "post_gc_log" "SELECT count(*) FROM dolt_log;" "^[1-9]" "$DB"
 # ============================================================
 
 run_test "post_gc_at_b99" \
-  "SELECT count(*) FROM dolt_at('t', 'b99');" "2" "$DB"
+  "SELECT count(*) FROM dolt_at_t('b99');" "2" "$DB"
 run_test "post_gc_at_b99_val" \
-  "SELECT val FROM dolt_at('t', 'b99') WHERE id=99;" "99" "$DB"
+  "SELECT val FROM dolt_at_t('b99') WHERE id=99;" "99" "$DB"
 
 rm -f "$DB"
 

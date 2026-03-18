@@ -243,17 +243,17 @@ SELECT dolt_tag('v2');" | $DOLTLITE "$DB" > /dev/null 2>&1
 
 # At v1: no extra column, 1 row
 run_test "at_before_alter_count" \
-  "SELECT count(*) FROM dolt_at('t','v1');" \
+  "SELECT count(*) FROM dolt_at_t('v1');" \
   "1" "$DB"
 
 # At v2: 2 rows
 run_test "at_after_alter_count" \
-  "SELECT count(*) FROM dolt_at('t','v2');" \
+  "SELECT count(*) FROM dolt_at_t('v2');" \
   "2" "$DB"
 
 # At v2: extra column data accessible
 run_test_match "at_after_alter_extra" \
-  "SELECT * FROM dolt_at('t','v2') WHERE rowid_val=1;" \
+  "SELECT * FROM dolt_at_t('v2') WHERE rowid_val=1;" \
   "new" "$DB"
 
 rm -f "$DB"

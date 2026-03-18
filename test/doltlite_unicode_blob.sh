@@ -30,7 +30,7 @@ run_test_match "emoji_diff_type" \
   "modified" "$DB"
 
 run_test_match "emoji_diff_to_value" \
-  "SELECT to_value FROM dolt_diff('t') WHERE column_name='val';" \
+  "SELECT to_value FROM dolt_diff('t') WHERE rowid_val=1;" \
   "Goodbye" "$DB"
 
 echo "SELECT dolt_commit('-A','-m','update emoji');" | $DOLTLITE "$DB" > /dev/null 2>&1
@@ -289,7 +289,7 @@ run_test "long_name_data" \
 
 # dolt_at works with long table name
 run_test_match "long_name_at" \
-  "SELECT count(*) FROM dolt_at('${LONG_NAME}', (SELECT commit_hash FROM dolt_log LIMIT 1));" \
+  "SELECT count(*) FROM dolt_at_${LONG_NAME}((SELECT commit_hash FROM dolt_log LIMIT 1));" \
   "^1$" "$DB"
 
 rm -f "$DB"
@@ -411,11 +411,11 @@ run_test "real_zero" \
 
 run_test_match "real_large" \
   "SELECT val FROM t WHERE id=3;" \
-  "1\.0e\+0*308|1e\+0*308|inf|Inf" "$DB"
+  "1[.]0e[+]0*308|1e[+]0*308|inf|Inf" "$DB"
 
 run_test_match "real_neg_large" \
   "SELECT val FROM t WHERE id=4;" \
-  "-1\.0e\+0*308|-1e\+0*308|-inf|-Inf" "$DB"
+  "-1[.]0e[+]0*308|-1e[+]0*308|-inf|-Inf" "$DB"
 
 run_test_match "real_small" \
   "SELECT typeof(val) FROM t WHERE id=5;" \

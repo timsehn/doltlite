@@ -150,11 +150,11 @@ echo "Test 5: dolt_at for early commit..."
 # After the merge we have 502 log entries (500 original + main_after_branch + merge)
 # commit_10 is at offset 491 from HEAD (502 - 11 = 491)
 run_test "at_commit10_count" \
-  "SELECT count(*) FROM dolt_at('t', (SELECT commit_hash FROM dolt_log WHERE message='commit_10' LIMIT 1));" \
+  "SELECT count(*) FROM dolt_at_t((SELECT commit_hash FROM dolt_log WHERE message='commit_10' LIMIT 1));" \
   "11" "$DB"
 
 run_test "at_commit10_tracker_val" \
-  "SELECT val FROM dolt_at('t', (SELECT commit_hash FROM dolt_log WHERE message='commit_10' LIMIT 1)) WHERE id=0;" \
+  "SELECT val FROM dolt_at_t((SELECT commit_hash FROM dolt_log WHERE message='commit_10' LIMIT 1)) WHERE id=0;" \
   "v10" "$DB"
 
 # ============================================================
