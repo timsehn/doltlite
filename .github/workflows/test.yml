@@ -141,6 +141,32 @@ jobs:
           libsqlite3.a -lz -lpthread -lm
         ./concurrent_branch_test
 
+    - name: Build libdoltlite
+      run: cd build && make doltlite-lib
+
+    - name: C library quickstart integration test
+      run: |
+        cd build
+        gcc -o quickstart ../examples/quickstart.c -I. libdoltlite.a -lpthread -lz -lm
+        ./quickstart
+
+    - name: Python quickstart integration test
+      run: |
+        cd build
+        LD_PRELOAD=./libdoltlite.so python3 ../examples/quickstart.py
+
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+
+    - name: Go quickstart integration test
+      run: |
+        cd examples/go
+        CGO_CFLAGS="-I../../build" CGO_LDFLAGS="../../build/libdoltlite.a -lz -lpthread -lm" \
+          go build -tags libsqlite3 -o quickstart .
+        ./quickstart
+
     - name: Build testfixture
       run: cd build && make testfixture
 

@@ -28,6 +28,70 @@ To build stock SQLite instead (for comparison):
 make DOLTLITE_PROLLY=0 sqlite3
 ```
 
+## Using as a C Library
+
+Doltlite is designed as a drop-in replacement for SQLite. It uses the same
+`sqlite3.h` header and `sqlite3_*` API, so existing C programs work without
+code changes — just link against `libdoltlite` instead of `libsqlite3` to get
+version control. The build produces `libdoltlite.a` (static) and
+`libdoltlite.dylib`/`.so` (shared) with the full prolly tree engine and all
+Dolt functions included.
+
+```bash
+cd build
+../configure
+make doltlite-lib   # builds libdoltlite.a and libdoltlite.dylib/.so
+```
+
+Compile and link your program:
+
+```bash
+# Static link (recommended — single binary, no runtime deps)
+gcc -o myapp myapp.c -I/path/to/build libdoltlite.a -lpthread -lz
+
+# Dynamic link
+gcc -o myapp myapp.c -I/path/to/build -L/path/to/build -ldoltlite -lpthread -lz
+```
+
+The API is the standard [SQLite C API](https://sqlite.org/cintro.html) —
+`sqlite3_open`, `sqlite3_exec`, `sqlite3_prepare_v2`, etc. Dolt features are
+called as SQL functions (`dolt_commit`, `dolt_branch`, `dolt_merge`, ...) and
+virtual tables (`dolt_log`, `dolt_diff_<table>`, `dolt_history_<table>`, ...).
+
+### Quickstart Examples
+
+Complete working examples that demonstrate commits, branches, merges,
+point-in-time queries, diffs, and tags. Each example does the same thing
+in a different language.
+
+**C** ([`examples/quickstart.c`](examples/quickstart.c)) — based on the
+[SQLite quickstart](https://sqlite.org/quickstart.html):
+
+```bash
+cd build
+gcc -o quickstart ../examples/quickstart.c -I. libdoltlite.a -lpthread -lz
+./quickstart
+```
+
+**Python** ([`examples/quickstart.py`](examples/quickstart.py)) — uses the
+standard `sqlite3` module, zero code changes:
+
+```bash
+cd build
+LD_PRELOAD=./libdoltlite.so python3 ../examples/quickstart.py
+```
+
+**Go** ([`examples/go/main.go`](examples/go/main.go)) — uses
+[mattn/go-sqlite3](https://github.com/mattn/go-sqlite3) with the `libsqlite3`
+build tag:
+
+```bash
+cd examples/go
+CGO_CFLAGS="-I../../build" CGO_LDFLAGS="../../build/libdoltlite.a -lz -lpthread" \
+    go build -tags libsqlite3 -o quickstart .
+./quickstart
+```
+
 ## Dolt Features
 
 Version control operations are exposed as SQL functions and virtual tables.
