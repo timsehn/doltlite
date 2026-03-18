@@ -53,11 +53,10 @@ INSERT INTO t VALUES(2,'rollback_me');
 ROLLBACK;" | $DOLTLITE "$DB" > /dev/null 2>&1
 run_test "txn_rollback" "SELECT count(*) FROM t;" "1" "$DB"
 
-# Commit inside transaction (skip — segfaults on Linux CI, pre-existing issue)
-# echo "BEGIN; INSERT INTO t VALUES(3,'txn_insert'); COMMIT;" | $DOLTLITE "$DB"
-
-# Insert without transaction instead
-echo "INSERT INTO t VALUES(3,'txn_insert');" | $DOLTLITE "$DB" > /dev/null 2>&1
+# Commit inside transaction
+echo "BEGIN;
+INSERT INTO t VALUES(3,'txn_insert');
+COMMIT;" | $DOLTLITE "$DB" > /dev/null 2>&1
 run_test "txn_commit" "SELECT count(*) FROM t;" "2" "$DB"
 
 # Dolt status sees the change

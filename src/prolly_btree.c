@@ -443,35 +443,19 @@ static int serializeCatalog(Btree *pBtree, u8 **ppOut, int *pnOut){
   u8 *buf, *q;
   int i;
 
-  /* Populate table names and schema hashes from sqlite_master if missing */
+  /* Populate table names from sqlite_master if missing */
   if( pBtree->db ){
     for(i=0; i<nTables; i++){
       if( !pBtree->aTables[i].zName && pBtree->aTables[i].iTable>1 ){
         pBtree->aTables[i].zName = doltliteResolveTableNumber(
             pBtree->db, pBtree->aTables[i].iTable);
       }
-      /* Compute schema hash from CREATE TABLE SQL */
-      if( pBtree->aTables[i].iTable>1 && pBtree->aTables[i].zName ){
-        sqlite3_stmt *pStmt = 0;
-        char *zSql = sqlite3_mprintf(
-          "SELECT sql FROM sqlite_master WHERE type='table' AND tbl_name='%q'",
-          pBtree->aTables[i].zName);
-        if( zSql ){
-          if( sqlite3_prepare_v2(pBtree->db, zSql, -1, &pStmt, 0)==SQLITE_OK ){
-            if( sqlite3_step(pStmt)==SQLITE_ROW ){
-              const char *zCreate = (const char*)sqlite3_column_text(pStmt, 0);
-              if( zCreate ){
-                prollyHashCompute(zCreate, (int)strlen(zCreate),
-                                  &pBtree->aTables[i].schemaHash);
-              }
-            }
-            sqlite3_finalize(pStmt);
-          }
-          sqlite3_free(zSql);
-        }
-      }
     }
   }
+  /* Note: schemaHash is computed by doltliteUpdateSchemaHashes() which is
+  ** called from dolt_commit/dolt_add at the SQL function level — NOT here,
+  ** because serializeCatalog can be called during BtreeCommitPhaseTwo where
+  ** re-entrant SQL queries would crash. */
 
   /* Calculate variable size: per table = 4+1+20+20+2+name_len */
   for(i=0; i<nTables; i++){
@@ -2800,6 +2784,38 @@ BtShared *doltliteGetBtShared(sqlite3 *db){
 ** Flush all pending mutations and serialize catalog.
 ** Called by dolt_commit before snapshotting state.
 */
+/*
+** Compute schemaHash for each table by querying sqlite_master.
+** Must be called from SQL function context (NOT from BtreeCommit).
+*/
+void doltliteUpdateSchemaHashes(sqlite3 *db){
+  Btree *pBtree;
+  int i;
+  if( !db || db->nDb<=0 || !db->aDb[0].pBt ) return;
+  pBtree = db->aDb[0].pBt;
+  for(i=0; i<pBtree->nTables; i++){
+    if( pBtree->aTables[i].iTable>1 && pBtree->aTables[i].zName ){
+      sqlite3_stmt *pStmt = 0;
+      char *zSql = sqlite3_mprintf(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND tbl_name='%q'",
+        pBtree->aTables[i].zName);
+      if( zSql ){
+        if( sqlite3_prepare_v2(db, zSql, -1, &pStmt, 0)==SQLITE_OK ){
+          if( sqlite3_step(pStmt)==SQLITE_ROW ){
+            const char *zCreate = (const char*)sqlite3_column_text(pStmt, 0);
+            if( zCreate ){
+              prollyHashCompute(zCreate, (int)strlen(zCreate),
+                                &pBtree->aTables[i].schemaHash);
+            }
+          }
+          sqlite3_finalize(pStmt);
+        }
+        sqlite3_free(zSql);
+      }
+    }
+  }
+}
+
 int doltliteFlushAndSerializeCatalog(sqlite3 *db, u8 **ppOut, int *pnOut){
   BtShared *pBt = doltliteGetBtShared(db);
   Btree *pBtree;
@@ -2809,6 +2825,9 @@ int doltliteFlushAndSerializeCatalog(sqlite3 *db, u8 **ppOut, int *pnOut){
   pBtree = db->aDb[0].pBt;
   rc = flushAllPending(pBt, 0);
   if( rc!=SQLITE_OK ) return rc;
+  /* Update schema hashes before serializing — safe here because this is
+  ** called from SQL function context, not from BtreeCommitPhaseTwo. */
+  doltliteUpdateSchemaHashes(db);
   return serializeCatalog(pBtree, ppOut, pnOut);
 }
 
