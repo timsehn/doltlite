@@ -1184,8 +1184,50 @@ int sqlite3BtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
     int rc = chunkStoreRefreshIfChanged(&pBt->store, &bChanged);
     if( rc!=SQLITE_OK ) return rc;
     if( bChanged ){
+      /* After refresh, decide whether the manifest state belongs to THIS
+      ** connection's branch.  The manifest headCommit is updated only by
+      ** dolt_commit / dolt_checkout.  If it matches our branch HEAD, the
+      ** manifest catalog/root may include uncommitted working changes and
+      ** we should use them.  If it doesn't match, a different branch
+      ** committed and we must reload from our branch HEAD commit. */
       ProllyHash catHash;
-      chunkStoreGetCatalog(&pBt->store, &catHash);
+      ProllyHash manifestHead;
+      const char *zBr = p->zBranch ? p->zBranch : "main";
+      ProllyHash branchHead;
+      int useBranchCommit = 0;
+
+      memset(&catHash, 0, sizeof(catHash));
+      chunkStoreGetHeadCommit(&pBt->store, &manifestHead);
+
+      if( chunkStoreFindBranch(&pBt->store, zBr, &branchHead)==SQLITE_OK
+       && !prollyHashIsEmpty(&branchHead)
+       && prollyHashCompare(&manifestHead, &branchHead)!=0 ){
+        /* Manifest was written by a different branch — load our branch's
+        ** committed state instead of the manifest catalog. */
+        u8 *commitData = 0;
+        int nCommitData = 0;
+        rc = chunkStoreGet(&pBt->store, &branchHead, &commitData, &nCommitData);
+        if( rc==SQLITE_OK && commitData ){
+          DoltliteCommit commit;
+          rc = doltliteCommitDeserialize(commitData, nCommitData, &commit);
+          sqlite3_free(commitData);
+          if( rc==SQLITE_OK ){
+            memcpy(&catHash, &commit.catalogHash, sizeof(ProllyHash));
+            memcpy(&p->root, &commit.rootHash, sizeof(ProllyHash));
+            memcpy(&p->headCommit, &branchHead, sizeof(ProllyHash));
+            doltliteCommitClear(&commit);
+            useBranchCommit = 1;
+          }
+        }
+      }
+
+      if( !useBranchCommit ){
+        /* Manifest belongs to our branch — use manifest catalog/root
+        ** (may include uncommitted working changes). */
+        chunkStoreGetCatalog(&pBt->store, &catHash);
+        chunkStoreGetRoot(&pBt->store, &p->root);
+      }
+
       if( !prollyHashIsEmpty(&catHash) ){
         u8 *catData = 0;
         int nCatData = 0;
@@ -1196,7 +1238,6 @@ int sqlite3BtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
           if( rc!=SQLITE_OK ) return rc;
         }
       }
-      chunkStoreGetRoot(&pBt->store, &p->root);
       p->committedRoot = p->root;
       p->iBDataVersion++;
       if( pBt->pPagerShim ){
