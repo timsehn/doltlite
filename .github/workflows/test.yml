@@ -41,6 +41,9 @@ jobs:
     - name: Branding tests
       run: cd build && bash ../test/doltlite_branding.sh
 
+    - name: File persistence tests
+      run: cd build && bash ../test/doltlite_persistence.sh
+
     - name: Smoke test
       run: |
         cd build
