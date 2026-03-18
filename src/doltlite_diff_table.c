@@ -176,7 +176,8 @@ static void dtResultField(
 typedef struct ColInfo ColInfo;
 struct ColInfo {
   char **azName;    /* Column names (owned) */
-  int nCol;         /* Number of columns (excluding rowid PK) */
+  int nCol;         /* Number of columns (ALL columns including PK) */
+  int iPkCol;       /* Index of the INTEGER PRIMARY KEY column, or -1 */
 };
 
 static void freeColInfo(ColInfo *ci){
@@ -190,9 +191,10 @@ static void freeColInfo(ColInfo *ci){
 static int getColumnNames(sqlite3 *db, const char *zTable, ColInfo *ci){
   char *zSql;
   sqlite3_stmt *pStmt = 0;
-  int rc, i, nCol;
+  int rc, nCol;
 
   memset(ci, 0, sizeof(*ci));
+  ci->iPkCol = -1;
   zSql = sqlite3_mprintf("PRAGMA table_info(\"%w\")", zTable);
   if( !zSql ) return SQLITE_NOMEM;
 
@@ -213,11 +215,13 @@ static int getColumnNames(sqlite3 *db, const char *zTable, ColInfo *ci){
   while( sqlite3_step(pStmt)==SQLITE_ROW ){
     const char *zName = (const char*)sqlite3_column_text(pStmt, 1);
     int pk = sqlite3_column_int(pStmt, 5);
-    /* Skip INTEGER PRIMARY KEY (it's the rowid, not in the record body) */
-    if( pk==1 ){
-      const char *zType = (const char*)sqlite3_column_text(pStmt, 2);
-      if( zType && (sqlite3_stricmp(zType,"INTEGER")==0) ) continue;
+    const char *zType = (const char*)sqlite3_column_text(pStmt, 2);
+
+    /* Track which column is the INTEGER PRIMARY KEY (rowid alias) */
+    if( pk==1 && zType && sqlite3_stricmp(zType,"INTEGER")==0 ){
+      ci->iPkCol = ci->nCol;
     }
+
     ci->azName[ci->nCol] = sqlite3_mprintf("%s", zName ? zName : "");
     ci->nCol++;
   }
@@ -631,37 +635,56 @@ static int dtColumn(sqlite3_vtab_cursor *cur, sqlite3_context *ctx, int col){
   */
 
   if( nCols > 0 && col < nCols ){
-    /* from_<col> — decode from old record.
-    ** Record field 0 is the rowid placeholder (NULL for INTKEY tables),
-    ** so non-PK columns start at field index 1. */
-    if( r->pOldVal && r->nOldVal > 0 ){
-      RecordInfo ri;
-      int recIdx = col + 1;  /* skip rowid placeholder at field 0 */
-      dtParseRecord(r->pOldVal, r->nOldVal, &ri);
-      if( recIdx < ri.nField ){
-        dtResultField(ctx, r->pOldVal, r->nOldVal,
-                      ri.aType[recIdx], ri.aOffset[recIdx]);
+    /* from_<col> */
+    int colIdx = col;
+    if( colIdx == v->cols.iPkCol ){
+      /* PK column: value comes from the rowid, not the record body.
+      ** For 'added' rows (no old val), the PK didn't exist → NULL. */
+      if( r->pOldVal && r->nOldVal > 0 ){
+        sqlite3_result_int64(ctx, r->intKey);
       }else{
         sqlite3_result_null(ctx);
       }
     }else{
-      sqlite3_result_null(ctx);
+      /* Non-PK column: decode from old record body.
+      ** The record body has fields for all columns in schema order,
+      ** but the PK field stores NULL (placeholder). Map schema col
+      ** index directly to record field index. */
+      if( r->pOldVal && r->nOldVal > 0 ){
+        RecordInfo ri;
+        dtParseRecord(r->pOldVal, r->nOldVal, &ri);
+        if( colIdx < ri.nField ){
+          dtResultField(ctx, r->pOldVal, r->nOldVal,
+                        ri.aType[colIdx], ri.aOffset[colIdx]);
+        }else{
+          sqlite3_result_null(ctx);
+        }
+      }else{
+        sqlite3_result_null(ctx);
+      }
     }
   }else if( nCols > 0 && col < 2*nCols ){
-    /* to_<col> — decode from new record */
-    int fieldIdx = col - nCols;
-    if( r->pNewVal && r->nNewVal > 0 ){
-      RecordInfo ri;
-      int recIdx = fieldIdx + 1;  /* skip rowid placeholder */
-      dtParseRecord(r->pNewVal, r->nNewVal, &ri);
-      if( recIdx < ri.nField ){
-        dtResultField(ctx, r->pNewVal, r->nNewVal,
-                      ri.aType[recIdx], ri.aOffset[recIdx]);
+    /* to_<col> */
+    int colIdx = col - nCols;
+    if( colIdx == v->cols.iPkCol ){
+      if( r->pNewVal && r->nNewVal > 0 ){
+        sqlite3_result_int64(ctx, r->intKey);
       }else{
         sqlite3_result_null(ctx);
       }
     }else{
-      sqlite3_result_null(ctx);
+      if( r->pNewVal && r->nNewVal > 0 ){
+        RecordInfo ri;
+        dtParseRecord(r->pNewVal, r->nNewVal, &ri);
+        if( colIdx < ri.nField ){
+          dtResultField(ctx, r->pNewVal, r->nNewVal,
+                        ri.aType[colIdx], ri.aOffset[colIdx]);
+        }else{
+          sqlite3_result_null(ctx);
+        }
+      }else{
+        sqlite3_result_null(ctx);
+      }
     }
   }else{
     /* Fixed columns at the end */
