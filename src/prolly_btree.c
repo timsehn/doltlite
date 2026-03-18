@@ -164,6 +164,7 @@ static const ProllyHash emptyHash = {{0}};
 struct TableEntry {
   Pgno iTable;           /* Logical table number (like SQLite's root page) */
   ProllyHash root;       /* Current root hash of this table's prolly tree */
+  ProllyHash schemaHash; /* Hash of this table's CREATE TABLE SQL (schema) */
   u8 flags;              /* BTREE_INTKEY or BTREE_BLOBKEY */
   char *zName;           /* Table name (owned, NULL for internal tables) */
 };
@@ -442,20 +443,40 @@ static int serializeCatalog(Btree *pBtree, u8 **ppOut, int *pnOut){
   u8 *buf, *q;
   int i;
 
-  /* Populate table names from sqlite_master if missing */
+  /* Populate table names and schema hashes from sqlite_master if missing */
   if( pBtree->db ){
     for(i=0; i<nTables; i++){
       if( !pBtree->aTables[i].zName && pBtree->aTables[i].iTable>1 ){
         pBtree->aTables[i].zName = doltliteResolveTableNumber(
             pBtree->db, pBtree->aTables[i].iTable);
       }
+      /* Compute schema hash from CREATE TABLE SQL */
+      if( pBtree->aTables[i].iTable>1 && pBtree->aTables[i].zName ){
+        sqlite3_stmt *pStmt = 0;
+        char *zSql = sqlite3_mprintf(
+          "SELECT sql FROM sqlite_master WHERE type='table' AND tbl_name='%q'",
+          pBtree->aTables[i].zName);
+        if( zSql ){
+          if( sqlite3_prepare_v2(pBtree->db, zSql, -1, &pStmt, 0)==SQLITE_OK ){
+            if( sqlite3_step(pStmt)==SQLITE_ROW ){
+              const char *zCreate = (const char*)sqlite3_column_text(pStmt, 0);
+              if( zCreate ){
+                prollyHashCompute(zCreate, (int)strlen(zCreate),
+                                  &pBtree->aTables[i].schemaHash);
+              }
+            }
+            sqlite3_finalize(pStmt);
+          }
+          sqlite3_free(zSql);
+        }
+      }
     }
   }
 
-  /* Calculate variable size: per table = 4+1+20+2+name_len */
+  /* Calculate variable size: per table = 4+1+20+20+2+name_len */
   for(i=0; i<nTables; i++){
     int nLen = pBtree->aTables[i].zName ? (int)strlen(pBtree->aTables[i].zName) : 0;
-    sz += 4 + 1 + PROLLY_HASH_SIZE + 2 + nLen;
+    sz += 4 + 1 + PROLLY_HASH_SIZE + PROLLY_HASH_SIZE + 2 + nLen;
   }
 
   buf = sqlite3_malloc(sz);
@@ -475,7 +496,7 @@ static int serializeCatalog(Btree *pBtree, u8 **ppOut, int *pnOut){
     q[0]=(u8)v; q[1]=(u8)(v>>8); q[2]=(u8)(v>>16); q[3]=(u8)(v>>24);
     q += 4;
   }
-  /* table entries: iTable(4) + flags(1) + root(20) + name_len(2) + name(var) */
+  /* table entries: iTable(4) + flags(1) + root(20) + schemaHash(20) + name_len(2) + name(var) */
   for(i=0; i<nTables; i++){
     struct TableEntry *t = &pBtree->aTables[i];
     u32 pg = t->iTable;
@@ -484,6 +505,8 @@ static int serializeCatalog(Btree *pBtree, u8 **ppOut, int *pnOut){
     q += 4;
     *q++ = t->flags;
     memcpy(q, t->root.data, PROLLY_HASH_SIZE);
+    q += PROLLY_HASH_SIZE;
+    memcpy(q, t->schemaHash.data, PROLLY_HASH_SIZE);
     q += PROLLY_HASH_SIZE;
     q[0]=(u8)nLen; q[1]=(u8)(nLen>>8); q+=2;
     if( nLen>0 ) memcpy(q, t->zName, nLen);
@@ -530,7 +553,12 @@ static int deserializeCatalog(Btree *pBtree, const u8 *data, int nData){
     if( !pTE ) return SQLITE_NOMEM;
     memcpy(pTE->root.data, q, PROLLY_HASH_SIZE);
     q += PROLLY_HASH_SIZE;
-    /* Read name if present (v2 catalog format) */
+    /* schemaHash(20) */
+    if( q + PROLLY_HASH_SIZE <= data+nData ){
+      memcpy(pTE->schemaHash.data, q, PROLLY_HASH_SIZE);
+      q += PROLLY_HASH_SIZE;
+    }
+    /* name_len(2) + name(var) */
     if( q+2 <= data+nData ){
       nLen = q[0] | (q[1]<<8); q += 2;
       if( nLen>0 && q+nLen<=data+nData ){
