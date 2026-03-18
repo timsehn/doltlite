@@ -1259,7 +1259,6 @@ void chunkStoreSetConflictsCatalog(ChunkStore *cs, const ProllyHash *pHash){
 */
 int chunkStoreRefresh(ChunkStore *cs, int *pChanged){
   ProllyHash oldCatalog;
-  ProllyHash oldHeadCommit;
   int rc;
 
   if( pChanged ) *pChanged = 0;
@@ -1270,9 +1269,8 @@ int chunkStoreRefresh(ChunkStore *cs, int *pChanged){
     return SQLITE_OK;
   }
 
-  /* Remember old catalog and head commit hashes */
+  /* Remember old catalog hash */
   memcpy(&oldCatalog, &cs->catalog, sizeof(ProllyHash));
-  memcpy(&oldHeadCommit, &cs->headCommit, sizeof(ProllyHash));
 
   /* Re-open the file to pick up atomic renames */
   if( cs->pFile ){
@@ -1329,12 +1327,9 @@ int chunkStoreRefresh(ChunkStore *cs, int *pChanged){
     cs->iAppendOffset = CHUNK_MANIFEST_SIZE;
   }
 
-  /* Check if catalog or head commit changed */
-  if( pChanged ){
-    if( prollyHashCompare(&oldCatalog, &cs->catalog)!=0
-     || prollyHashCompare(&oldHeadCommit, &cs->headCommit)!=0 ){
-      *pChanged = 1;
-    }
+  /* Check if catalog changed */
+  if( pChanged && prollyHashCompare(&oldCatalog, &cs->catalog)!=0 ){
+    *pChanged = 1;
   }
 
   return SQLITE_OK;
