@@ -448,9 +448,11 @@ static void doltliteCommitFunc(
 
   doltliteHashToHex(&commitHash, hexBuf);
 
-  /* Register dolt_diff_<table> and dolt_history_<table> for any new tables */
-  doltliteRegisterDiffTables(db);
-  doltliteRegisterHistoryTables(db);
+  /* DISABLED: Register functions were opening cursors that interfered
+  ** with the deferred MutMap flush. Tables are registered at db open
+  ** and via doltliteRegister. */
+  /* doltliteRegisterDiffTables(db); */
+  /* doltliteRegisterHistoryTables(db); */
 
   sqlite3_result_text(context, hexBuf, -1, SQLITE_TRANSIENT);
 }
