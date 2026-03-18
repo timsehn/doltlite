@@ -1178,6 +1178,36 @@ int sqlite3BtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
     return SQLITE_OK;
   }
 
+  /* Detect if another connection replaced the database file */
+  {
+    int bChanged = 0;
+    int rc = chunkStoreRefreshIfChanged(&pBt->store, &bChanged);
+    if( rc!=SQLITE_OK ) return rc;
+    if( bChanged ){
+      ProllyHash catHash;
+      chunkStoreGetCatalog(&pBt->store, &catHash);
+      if( !prollyHashIsEmpty(&catHash) ){
+        u8 *catData = 0;
+        int nCatData = 0;
+        rc = chunkStoreGet(&pBt->store, &catHash, &catData, &nCatData);
+        if( rc==SQLITE_OK && catData ){
+          rc = deserializeCatalog(p, catData, nCatData);
+          sqlite3_free(catData);
+          if( rc!=SQLITE_OK ) return rc;
+        }
+      }
+      chunkStoreGetRoot(&pBt->store, &p->root);
+      p->committedRoot = p->root;
+      p->iBDataVersion++;
+      if( pBt->pPagerShim ){
+        pBt->pPagerShim->iDataVersion++;
+      }
+      if( pSchemaVersion ){
+        *pSchemaVersion = (int)p->aMeta[BTREE_SCHEMA_VERSION];
+      }
+    }
+  }
+
   if( wrFlag ){
     if( pBt->btsFlags & BTS_READ_ONLY ){
       return SQLITE_READONLY;
