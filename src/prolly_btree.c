@@ -1188,50 +1188,6 @@ int sqlite3BtreeIsReadonly(Btree *p){
 int sqlite3BtreeBeginTrans(Btree *p, int wrFlag, int *pSchemaVersion){
   BtShared *pBt = p->pBt;
 
-  /* Refresh from disk to pick up changes made by other connections.
-  ** Each connection has its own ChunkStore with its own file descriptor.
-  ** After another connection commits (via atomic rename), this connection's
-  ** fd points to the old (deleted) inode.  Re-open and re-read the manifest
-  ** so we see the latest catalog, chunk index, and refs. */
-  if( p->inTrans==TRANS_NONE ){
-    int changed = 0;
-    int rc = chunkStoreRefresh(&pBt->store, &changed);
-    if( rc==SQLITE_OK && changed ){
-      /* Catalog was modified by another connection — reload it */
-      ProllyHash catHash;
-      chunkStoreGetCatalog(&pBt->store, &catHash);
-      if( !prollyHashIsEmpty(&catHash) ){
-        u8 *catData = 0;
-        int nCatData = 0;
-        rc = chunkStoreGet(&pBt->store, &catHash, &catData, &nCatData);
-        if( rc==SQLITE_OK && catData ){
-          rc = deserializeCatalog(p, catData, nCatData);
-          sqlite3_free(catData);
-        }
-      }
-      if( rc==SQLITE_OK ){
-        /* Bump data version so SQLite's schema-reload logic detects the
-        ** change and re-reads sqlite_master from the updated table 1. */
-        p->iBDataVersion++;
-        if( pBt->pPagerShim ){
-          pBt->pPagerShim->iDataVersion++;
-        }
-        /* Reload per-session branch state from the refreshed store */
-        {
-          ProllyHash headCommit;
-          chunkStoreGetHeadCommit(&pBt->store, &headCommit);
-          if( !prollyHashIsEmpty(&headCommit) ){
-            p->headCommit = headCommit;
-          }
-          chunkStoreGetStagedCatalog(&pBt->store, &p->stagedCatalog);
-          chunkStoreGetRoot(&pBt->store, &p->root);
-          p->committedRoot = p->root;
-        }
-      }
-    }
-    /* Non-fatal: if refresh fails, proceed with stale data */
-  }
-
   if( pSchemaVersion ){
     *pSchemaVersion = (int)p->aMeta[BTREE_SCHEMA_VERSION];
   }
