@@ -58,16 +58,37 @@ The API is the standard [SQLite C API](https://sqlite.org/cintro.html) —
 called as SQL functions (`dolt_commit`, `dolt_branch`, `dolt_merge`, ...) and
 virtual tables (`dolt_log`, `dolt_diff_<table>`, `dolt_history_<table>`, ...).
 
-### Quickstart Example
+### Quickstart Examples
 
-See [`examples/quickstart.c`](examples/quickstart.c) for a complete working
-program that demonstrates commits, branches, merges, point-in-time queries,
-diffs, and tags through the C API. Based on the
-[SQLite quickstart](https://sqlite.org/quickstart.html).
+Complete working examples that demonstrate commits, branches, merges,
+point-in-time queries, diffs, and tags. Each example does the same thing
+in a different language.
+
+**C** ([`examples/quickstart.c`](examples/quickstart.c)) — based on the
+[SQLite quickstart](https://sqlite.org/quickstart.html):
 
 ```bash
 cd build
 gcc -o quickstart ../examples/quickstart.c -I. libdoltlite.a -lpthread -lz
+./quickstart
+```
+
+**Python** ([`examples/quickstart.py`](examples/quickstart.py)) — uses the
+standard `sqlite3` module, zero code changes:
+
+```bash
+cd build
+LD_PRELOAD=./libdoltlite.so python3 ../examples/quickstart.py
+```
+
+**Go** ([`examples/go/main.go`](examples/go/main.go)) — uses
+[mattn/go-sqlite3](https://github.com/mattn/go-sqlite3) with the `libsqlite3`
+build tag:
+
+```bash
+cd examples/go
+CGO_CFLAGS="-I../../build" CGO_LDFLAGS="../../build/libdoltlite.a -lz -lpthread" \
+    go build -tags libsqlite3 -o quickstart .
 ./quickstart
 ```
 
