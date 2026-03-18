@@ -86,6 +86,14 @@ static int applyTheirRecord(
 
   while( sqlite3_step(pInfo)==SQLITE_ROW ){
     const char *zName = (const char*)sqlite3_column_text(pInfo, 1);
+    int pk = sqlite3_column_int(pInfo, 5);
+    /* Skip the INTEGER PRIMARY KEY column — it's the rowid, not in the record */
+    if( pk==1 ){
+      const char *zType = (const char*)sqlite3_column_text(pInfo, 2);
+      if( zType && sqlite3_stricmp(zType, "INTEGER")==0 ){
+        continue; /* This is an alias for rowid; skip */
+      }
+    }
     if( nCol >= nColAlloc ){
       nColAlloc = nColAlloc ? nColAlloc*2 : 8;
       azCol = sqlite3_realloc(azCol, nColAlloc * (int)sizeof(char*));
@@ -109,12 +117,12 @@ static int applyTheirRecord(
   pHdrEnd = pRec + (int)hdrSize;
   pBody = pRec + (int)hdrSize;
 
-  /* Build: UPDATE "table" SET col=val, ... WHERE rowid=intKey
-  ** Skip the INTEGER PRIMARY KEY column (stored as NULL in the record). */
+  /* Build: INSERT OR REPLACE INTO "table"(rowid, col1, col2, ...) VALUES(key, v1, v2, ...) */
   {
-    char *zUpd = sqlite3_mprintf("UPDATE \"%w\" SET ", zTable);
+    /* Use a dynamic string buffer */
+    char *zIns = sqlite3_mprintf("INSERT OR REPLACE INTO \"%w\"(rowid", zTable);
+    char *zVals = sqlite3_mprintf("VALUES(%lld", intKey);
     char *zTmp;
-    int nSet = 0;
 
     colIdx = 0;
     while( p < pHdrEnd && p < pEnd && colIdx < nCol ){
@@ -122,37 +130,27 @@ static int applyTheirRecord(
       int stBytes = cfReadVarint(p, pHdrEnd, &st);
       p += stBytes;
 
-      /* For NULL serial type on the first column, this is likely the
-      ** INTEGER PRIMARY KEY (rowid alias) stored as NULL -- skip it
-      ** in the UPDATE since the rowid is set via the WHERE clause. */
-      if( st==0 && colIdx==0 ){
-        colIdx++;
-        continue;
-      }
+      /* Append column name */
+      zTmp = sqlite3_mprintf("%s,\"%w\"", zIns, azCol[colIdx]);
+      sqlite3_free(zIns); zIns = zTmp;
 
-      /* Add comma separator between SET clauses */
-      if( nSet > 0 ){
-        zTmp = sqlite3_mprintf("%s, ", zUpd);
-        sqlite3_free(zUpd); zUpd = zTmp;
-      }
-
-      /* Decode value and build SET clause */
+      /* Decode value and append to VALUES */
       if( st==0 ){
-        zTmp = sqlite3_mprintf("%s\"%w\"=NULL", zUpd, azCol[colIdx]);
-        sqlite3_free(zUpd); zUpd = zTmp;
+        zTmp = sqlite3_mprintf("%s,NULL", zVals);
+        sqlite3_free(zVals); zVals = zTmp;
       }else if( st==8 ){
-        zTmp = sqlite3_mprintf("%s\"%w\"=0", zUpd, azCol[colIdx]);
-        sqlite3_free(zUpd); zUpd = zTmp;
+        zTmp = sqlite3_mprintf("%s,0", zVals);
+        sqlite3_free(zVals); zVals = zTmp;
       }else if( st==9 ){
-        zTmp = sqlite3_mprintf("%s\"%w\"=1", zUpd, azCol[colIdx]);
-        sqlite3_free(zUpd); zUpd = zTmp;
+        zTmp = sqlite3_mprintf("%s,1", zVals);
+        sqlite3_free(zVals); zVals = zTmp;
       }else if( st>=1 && st<=6 ){
         static const int sizes[] = {0,1,2,3,4,6,8};
         int nBytes = sizes[st];
         if( pBody + nBytes <= pEnd ){
           i64 v = cfReadInt(pBody, nBytes);
-          zTmp = sqlite3_mprintf("%s\"%w\"=%lld", zUpd, azCol[colIdx], v);
-          sqlite3_free(zUpd); zUpd = zTmp;
+          zTmp = sqlite3_mprintf("%s,%lld", zVals, v);
+          sqlite3_free(zVals); zVals = zTmp;
         }
         pBody += nBytes;
       }else if( st==7 ){
@@ -163,54 +161,57 @@ static int applyTheirRecord(
           int k;
           for(k=0; k<8; k++) bits = (bits<<8) | pBody[k];
           memcpy(&v, &bits, 8);
-          zTmp = sqlite3_mprintf("%s\"%w\"=%!.15g", zUpd, azCol[colIdx], v);
-          sqlite3_free(zUpd); zUpd = zTmp;
+          zTmp = sqlite3_mprintf("%s,%!.15g", zVals, v);
+          sqlite3_free(zVals); zVals = zTmp;
         }
         pBody += 8;
       }else if( st>=12 && (st&1)==0 ){
         /* Blob */
         int len = ((int)st - 12) / 2;
-        zTmp = sqlite3_mprintf("%s\"%w\"=X'", zUpd, azCol[colIdx]);
-        sqlite3_free(zUpd); zUpd = zTmp;
         if( pBody + len <= pEnd ){
-          int k;
-          for(k=0; k<len; k++){
-            zTmp = sqlite3_mprintf("%s%02x", zUpd, pBody[k]);
-            sqlite3_free(zUpd); zUpd = zTmp;
+          zTmp = sqlite3_mprintf("%s,X'", zVals);
+          sqlite3_free(zVals); zVals = zTmp;
+          {
+            int k;
+            for(k=0; k<len; k++){
+              zTmp = sqlite3_mprintf("%s%02x", zVals, pBody[k]);
+              sqlite3_free(zVals); zVals = zTmp;
+            }
           }
+          zTmp = sqlite3_mprintf("%s'", zVals);
+          sqlite3_free(zVals); zVals = zTmp;
         }
-        zTmp = sqlite3_mprintf("%s'", zUpd);
-        sqlite3_free(zUpd); zUpd = zTmp;
         pBody += len;
       }else if( st>=13 && (st&1)==1 ){
         /* Text */
         int len = ((int)st - 13) / 2;
         if( pBody + len <= pEnd ){
+          /* Use %Q for safe quoting */
           char *zText = sqlite3_malloc(len+1);
           if( zText ){
             memcpy(zText, pBody, len);
             zText[len] = 0;
-            zTmp = sqlite3_mprintf("%s\"%w\"=%Q", zUpd, azCol[colIdx], zText);
-            sqlite3_free(zUpd); zUpd = zTmp;
+            zTmp = sqlite3_mprintf("%s,%Q", zVals, zText);
+            sqlite3_free(zVals); zVals = zTmp;
             sqlite3_free(zText);
           }
         }
         pBody += len;
       }
-      nSet++;
+
       colIdx++;
     }
 
-    /* Add WHERE clause */
-    zSql = sqlite3_mprintf("%s WHERE rowid=%lld", zUpd, intKey);
-    sqlite3_free(zUpd);
+    /* Close the statement */
+    zSql = sqlite3_mprintf("%s) %s)", zIns, zVals);
+    sqlite3_free(zIns);
+    sqlite3_free(zVals);
 
-    if( zSql && nSet > 0 ){
+    if( zSql ){
       rc = sqlite3_exec(db, zSql, 0, 0, 0);
       sqlite3_free(zSql);
     }else{
-      sqlite3_free(zSql);
-      rc = SQLITE_OK;
+      rc = SQLITE_NOMEM;
     }
 
     /* Free column names */
@@ -799,137 +800,25 @@ static void conflictsResolveFunc(sqlite3_context *ctx, int argc, sqlite3_value *
     for(i=0; i<nTables; i++){
       if( !aTables[i].zName || strcmp(aTables[i].zName, zTable)!=0 ) continue;
 
-      /* Apply each conflict's theirVal using BtreeInsert directly.
-      ** The theirVal is already a raw SQLite record — exactly what
-      ** BtreeInsert expects as pData. */
-      {
-        Pgno iTable;
-        if( doltliteResolveTableName(db, zTable, &iTable)==SQLITE_OK ){
-          /* Apply theirVal via SQL — decode the record and build UPDATE */
-          for(j=0; j<aTables[i].nConflicts; j++){
-            struct ConflictRow *cr = &aTables[i].aRows[j];
-            if( cr->pTheirVal && cr->nTheirVal > 0 ){
-              /* Decode their record to get the text value and UPDATE */
-              char *decoded = doltliteDecodeRecord(cr->pTheirVal, cr->nTheirVal);
-              if( decoded ){
-                /* The decoded record is "NULL|theirs_val" for INTKEY tables
-                ** (field 0 = NULL rowid placeholder, field 1+ = columns).
-                ** Extract the non-PK values and build an UPDATE. */
-                /* For simplicity, use a direct approach: DELETE + INSERT
-                ** via SQL with the decoded values. Actually, even simpler:
-                ** just UPDATE using the column values from the record. */
-
-                /* Parse decoded string to get column values.
-                ** Format: "val1|val2|..." where val1 is NULL (PK placeholder).
-                ** For a table (id PK, v TEXT), decoded = "NULL|theirs_val". */
-                char *p = decoded;
-                int fieldIdx = 0;
-                char *zUpdate = 0;
-                char *zSql2;
-
-                /* Skip fields until we find non-PK columns, build SET clause */
-                /* Use PRAGMA table_info to get column names */
-                {
-                  sqlite3_stmt *pTI = 0;
-                  char *zTI = sqlite3_mprintf("PRAGMA table_info(\"%w\")", zTable);
-                  if( zTI && sqlite3_prepare_v2(db, zTI, -1, &pTI, 0)==SQLITE_OK ){
-                    /* Walk record fields in parallel with table_info */
-                    const u8 *pRec = cr->pTheirVal;
-                    const u8 *pRecEnd = pRec + cr->nTheirVal;
-                    u64 hdrSz;
-                    int hdrB = cfReadVarint(pRec, pRecEnd, &hdrSz);
-                    const u8 *pH = pRec + hdrB;
-                    const u8 *pHEnd = pRec + (int)hdrSz;
-                    const u8 *pBody = pRec + (int)hdrSz;
-                    int fIdx = 0;
-
-                    while( sqlite3_step(pTI)==SQLITE_ROW && pH < pHEnd ){
-                      const char *zCol = (const char*)sqlite3_column_text(pTI, 1);
-                      int pk = sqlite3_column_int(pTI, 5);
-                      const char *zType = (const char*)sqlite3_column_text(pTI, 2);
-                      u64 st;
-                      int stB = cfReadVarint(pH, pHEnd, &st);
-                      pH += stB;
-
-                      /* Skip INTEGER PRIMARY KEY — it's the rowid */
-                      int isPK = (pk==1 && zType && sqlite3_stricmp(zType,"INTEGER")==0);
-
-                      if( !isPK && zCol ){
-                        char *zVal = 0;
-                        /* Decode the field value */
-                        if( st==0 ) zVal = sqlite3_mprintf("NULL");
-                        else if( st==8 ) zVal = sqlite3_mprintf("0");
-                        else if( st==9 ) zVal = sqlite3_mprintf("1");
-                        else if( st>=1 && st<=6 ){
-                          static const int sizes[] = {0,1,2,3,4,6,8};
-                          int nB = sizes[st];
-                          if( pBody+nB <= pRecEnd ){
-                            i64 v = cfReadInt(pBody, nB);
-                            zVal = sqlite3_mprintf("%lld", v);
-                          }
-                        }else if( st>=13 && (st&1)==1 ){
-                          int len = ((int)st-13)/2;
-                          if( pBody+len <= pRecEnd ){
-                            char *zText = sqlite3_malloc(len+1);
-                            if(zText){memcpy(zText,pBody,len);zText[len]=0;}
-                            zVal = sqlite3_mprintf("%Q", zText);
-                            sqlite3_free(zText);
-                          }
-                        }else if( st==7 && pBody+8<=pRecEnd ){
-                          double v; u64 bits=0; int k;
-                          for(k=0;k<8;k++) bits=(bits<<8)|pBody[k];
-                          memcpy(&v,&bits,8);
-                          zVal = sqlite3_mprintf("%!.15g", v);
-                        }
-
-                        if( zVal ){
-                          if( zUpdate ){
-                            char *zOld = zUpdate;
-                            zUpdate = sqlite3_mprintf("%s,\"%w\"=%s", zOld, zCol, zVal);
-                            sqlite3_free(zOld);
-                          }else{
-                            zUpdate = sqlite3_mprintf("\"%w\"=%s", zCol, zVal);
-                          }
-                          sqlite3_free(zVal);
-                        }
-                      }
-
-                      /* Advance body pointer past this field */
-                      if(st==0||st==8||st==9){}
-                      else if(st>=1&&st<=6){static const int s[]={0,1,2,3,4,6,8};pBody+=s[st];}
-                      else if(st==7)pBody+=8;
-                      else if(st>=12&&(st&1)==0)pBody+=((int)st-12)/2;
-                      else if(st>=13&&(st&1)==1)pBody+=((int)st-13)/2;
-                      fIdx++;
-                    }
-                    sqlite3_finalize(pTI);
-                  }
-                  sqlite3_free(zTI);
-                }
-
-                if( zUpdate ){
-                  zSql2 = sqlite3_mprintf("UPDATE \"%w\" SET %s WHERE rowid=%lld",
-                                           zTable, zUpdate, cr->intKey);
-                  if( zSql2 ){
-                    sqlite3_exec(db, zSql2, 0, 0, 0);
-                    sqlite3_free(zSql2);
-                  }
-                  sqlite3_free(zUpdate);
-                }
-                sqlite3_free(decoded);
-              }
-            }else{
-              /* They deleted the row */
-              char *zDel = sqlite3_mprintf("DELETE FROM \"%w\" WHERE rowid=%lld",
-                                            zTable, cr->intKey);
-              if(zDel){ sqlite3_exec(db, zDel, 0, 0, 0); sqlite3_free(zDel); }
-            }
-          }
+      /* Apply each conflict's theirVal */
+      for(j=0; j<aTables[i].nConflicts; j++){
+        struct ConflictRow *cr = &aTables[i].aRows[j];
+        if( cr->pTheirVal && cr->nTheirVal > 0 ){
+          /* Their value exists — decode the raw SQLite record and
+          ** apply it via INSERT OR REPLACE, which handles both the
+          ** deletion of our value and insertion of theirs atomically. */
+          rc = applyTheirRecord(db, zTable, cr->intKey,
+                                cr->pTheirVal, cr->nTheirVal);
           if( rc!=SQLITE_OK ){
             freeConflictTables(aTables, nTables);
-            sqlite3_result_error(ctx, "failed to apply theirs values", -1);
+            sqlite3_result_error(ctx, "failed to apply theirs value", -1);
             return;
           }
+        }else{
+          /* Their value is NULL — they deleted the row. Delete ours. */
+          char *zSql = sqlite3_mprintf("DELETE FROM \"%w\" WHERE rowid=%lld",
+                                        zTable, cr->intKey);
+          if(zSql){ sqlite3_exec(db, zSql, 0, 0, 0); sqlite3_free(zSql); }
         }
       }
 

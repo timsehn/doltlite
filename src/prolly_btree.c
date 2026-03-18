@@ -2353,9 +2353,14 @@ int sqlite3BtreeDelete(BtCursor *pCur, u8 flags){
         res = -1;
       }
       if( rc==SQLITE_OK && prollyCursorIsValid(&pCur->pCur) ){
-        /* Cursor is on the next entry. Tell Next() it's a no-op. */
+        /* Cursor landed on a valid entry after seeking to the deleted key.
+        ** If res>=0 the cursor is on the next entry (at or past the deleted
+        ** key position), so tell Next() it's a no-op (skipNext=1).
+        ** If res<0 the cursor fell back to a *previous* entry (the deleted
+        ** key was past the end), so Next() must actually advance (skipNext=-1).
+        ** This matches standard SQLite semantics for BTREE_SAVEPOSITION. */
         pCur->eState = CURSOR_SKIPNEXT;
-        pCur->skipNext = 1;
+        pCur->skipNext = (res>=0) ? 1 : -1;
       } else {
         pCur->eState = CURSOR_INVALID;
       }
