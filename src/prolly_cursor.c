@@ -284,16 +284,21 @@ int prollyCursorSeekInt(ProllyCursor *cur, i64 intKey, int *pRes){
     int idx = prollyNodeSearchInt(&pEntry->node, intKey, &searchRes);
 
     /*
-    ** For internal nodes: if exact match, descend into that child.
-    ** If no exact match, searchRes>0 means key is greater than the key at idx,
-    ** so we should follow the child at idx. If key is less and idx>0,
-    ** follow idx-1 to find the right subtree.
+    ** Internal node keys are the LAST (max) key in each child subtree.
+    ** prollyNodeSearchInt returns the index where intKey would be inserted.
+    **
+    ** If searchRes==0: exact match at idx, descend into child idx.
+    ** If searchRes>0: intKey > key[idx], need child idx+1 (next subtree).
+    ** If searchRes<0: intKey < key[idx], descend into child idx
+    **   (this child's subtree contains keys up to key[idx]).
+    **
+    ** But idx is clamped to [0, nItems-1] by the binary search, so if
+    ** intKey > all keys, idx is at nItems-1 and searchRes>0. In that
+    ** case we can't go to idx+1 (no more children) — but for a valid
+    ** tree, this child should contain the key since it's the rightmost.
     */
     if( searchRes>0 && idx<pEntry->node.nItems-1 ){
-      /* Key is larger than key at idx; stay at idx (the child whose
-      ** subtree upper-bounds may contain intKey) */
-    } else if( searchRes<0 && idx>0 ){
-      idx--;
+      idx++;
     }
 
     cur->aLevel[cur->iLevel].idx = idx;
