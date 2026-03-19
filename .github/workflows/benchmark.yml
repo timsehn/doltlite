@@ -32,19 +32,14 @@ jobs:
         fi
 
     - name: Build doltlite
-      run: cd build && make doltlite
-
-    - name: Build stock SQLite
-      run: cd build && make DOLTLITE_PROLLY=0 sqlite3
+      run: cd build && make doltlite-lib
 
     - name: Run benchmark
       id: bench
       run: |
         cd build
-        # Run benchmark, capture markdown output
-        bash ../test/sysbench_compare.sh > /tmp/bench_results.md 2>&1
+        bash ../test/sysbench_compare.sh > /tmp/bench_results.md
         cat /tmp/bench_results.md
-        # Set multiline output
         {
           echo "results<<EOF"
           cat /tmp/bench_results.md
