@@ -253,15 +253,19 @@ PYEOF
 # Run each test: single CLI invocation, SQL timestamps for timing
 # ============================================================
 run_bench() {
-  local engine="$1" binary="$2" sql_file="$3"
-  local db=":memory:"
-  # Replace BENCH_START/END markers with SQL timestamp queries.
-  # This captures wall-clock time for just the workload, not setup.
+  local engine="$1" binary="$2" sql_file="$3" db_template="$4"
+  # For file-backed, use a unique temp file per invocation
+  local db="$db_template"
+  if [ "$db" != ":memory:" ]; then
+    db="/tmp/bench_${engine}_${RANDOM}_$$.db"
+    rm -f "$db"
+  fi
   local output
   output=$(sed \
     -e "s/\.print BENCH_START/SELECT 'TS_START:' || (julianday('now')*86400000);/" \
     -e "s/\.print BENCH_END/SELECT 'TS_END:' || (julianday('now')*86400000);/" \
     "$sql_file" | perl -e 'alarm(120); exec @ARGV' "$binary" "$db" 2>&1)
+  if [ "$db" != ":memory:" ]; then rm -f "$db"; fi
   # Extract timestamps and compute delta
   echo "$output" | python3 -c "
 import sys, re
@@ -285,12 +289,12 @@ WRITE_TESTS="oltp_bulk_insert oltp_insert oltp_update_index oltp_update_non_inde
 # Output markdown table
 # ============================================================
 run_section() {
-  local tests="$1"
+  local tests="$1" db_sq="$2" db_dl="$3"
   echo "| Test | SQLite (ms) | Doltlite (ms) | Multiplier |"
   echo "|------|-------------|---------------|------------|"
   for t in $tests; do
-  s=$(run_bench sqlite "$SQLITE3" "$TMPDIR/$t.sql")
-  d=$(run_bench doltlite "$DOLTLITE" "$TMPDIR/$t.sql")
+  s=$(run_bench sqlite "$SQLITE3" "$TMPDIR/$t.sql" "$db_sq")
+  d=$(run_bench doltlite "$DOLTLITE" "$TMPDIR/$t.sql" "$db_dl")
   s_display="$s"
   d_display="$d"
   if [ "$s" -eq -1 ] 2>/dev/null; then s_display="crash"; fi
@@ -306,13 +310,25 @@ run_section() {
 
 echo "## Sysbench-Style Benchmark: Doltlite vs SQLite"
 echo ""
-echo "### Reads"
+echo "### In-Memory"
 echo ""
-run_section "$READ_TESTS"
+echo "#### Reads"
 echo ""
-echo "### Writes"
+run_section "$READ_TESTS" ":memory:" ":memory:"
 echo ""
-run_section "$WRITE_TESTS"
+echo "#### Writes"
+echo ""
+run_section "$WRITE_TESTS" ":memory:" ":memory:"
+echo ""
+echo "### File-Backed"
+echo ""
+echo "#### Reads"
+echo ""
+run_section "$READ_TESTS" "/tmp/bench_file" "/tmp/bench_file"
+echo ""
+echo "#### Writes"
+echo ""
+run_section "$WRITE_TESTS" "/tmp/bench_file" "/tmp/bench_file"
 
 echo ""
-echo "_${ROWS} rows, in-memory, single CLI invocation per test, .timer on for workload only._"
+echo "_${ROWS} rows, single CLI invocation per test, workload-only timing via SQL timestamps._"
