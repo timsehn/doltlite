@@ -98,12 +98,12 @@ struct ChunkStore {
   int nPending;
   int nPendingAlloc;
   u8 *pWriteBuf;             /* Buffer for pending chunk data */
-  int nWriteBuf;
-  int nWriteBufAlloc;
+  i64 nWriteBuf;
+  i64 nWriteBufAlloc;
 
   u8 readOnly;               /* True if opened read-only */
   u8 isMemory;               /* True if this is an in-memory store */
-  int nCommittedWriteBuf;    /* Bytes in pWriteBuf belonging to committed chunks */
+  i64 nCommittedWriteBuf;    /* Bytes in pWriteBuf belonging to committed chunks */
 };
 
 /* Open or create a chunk store at the given path */
