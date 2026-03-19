@@ -328,7 +328,6 @@ static int pushSavepoint(Btree *pBtree);
 static void refreshCursorRoot(BtCursor *pCur);
 static int countTreeEntries(Btree *pBtree, Pgno iTable, i64 *pCount);
 static int saveAllCursors(BtShared *pBt, Pgno iRoot, BtCursor *pExcept);
-static int blobKeyCompare(const u8 *a, int na, const u8 *b, int nb);
 static int serializeCatalog(Btree *pBtree, u8 **ppOut, int *pnOut);
 static int deserializeCatalog(Btree *pBtree, const u8 *data, int nData);
 
@@ -425,18 +424,6 @@ static void invalidateCursors(BtShared *pBt, Pgno iTable, int errCode){
       if( p->pMutMap ) prollyMutMapClear(p->pMutMap);
     }
   }
-}
-
-/*
-** Compare two blob keys using the same ordering as ProllyMutMap skip list.
-*/
-static int blobKeyCompare(const u8 *a, int na, const u8 *b, int nb){
-  int n = na < nb ? na : nb;
-  int c = memcmp(a, b, n);
-  if( c!=0 ) return c;
-  if( na < nb ) return -1;
-  if( na > nb ) return 1;
-  return 0;
 }
 
 /*
@@ -665,9 +652,16 @@ static int saveCursorPosition(BtCursor *pCur){
   }
 
   /* If the prolly cursor isn't actually valid (e.g. empty tree, or
-  ** cursor was set to CURSOR_VALID without a successful seek), just
-  ** invalidate rather than trying to save a position we don't have. */
+  ** cursor was set to CURSOR_VALID without a successful seek via MutMap),
+  ** use cached key data if available, otherwise invalidate. */
   if( !prollyCursorIsValid(&pCur->pCur) ){
+    if( pCur->curIntKey && (pCur->curFlags & BTCF_ValidNKey) ){
+      /* MutMap-satisfied seek: save the cached integer key */
+      pCur->nKey = pCur->cachedIntKey;
+      pCur->pKey = 0;
+      pCur->eState = CURSOR_REQUIRESEEK;
+      return SQLITE_OK;
+    }
     pCur->eState = CURSOR_INVALID;
     return SQLITE_OK;
   }
@@ -2086,9 +2080,7 @@ int sqlite3BtreeIndexMoveto(
 ){
   int rc;
   int res;
-  ProllyMutMapIter mutIter;
-  int haveMutMap = 0;
-  int treeValid;
+  int cmp;
 
   assert( !pCur->curIntKey );
 
@@ -2096,165 +2088,45 @@ int sqlite3BtreeIndexMoveto(
 
   CLEAR_CACHED_PAYLOAD(pCur);
 
-  /* Flush OTHER cursors' pending mutations on this table.
-  ** Our own MutMap is handled inline via merged iteration. */
-  {
-    BtCursor *p;
-    for(p = pCur->pBt->pCursor; p; p = p->pNext){
-      if( p!=pCur && p->pgnoRoot==pCur->pgnoRoot
-       && p->pMutMap && !prollyMutMapIsEmpty(p->pMutMap) ){
-        rc = flushMutMap(p);
-        if( rc!=SQLITE_OK ) return rc;
-        p->eState = CURSOR_INVALID;
-      }
-    }
-  }
+  /* Flush pending index mutations before scanning.
+  ** BLOBKEY writes are never deferred (SQLite's serialized record format
+  ** doesn't sort correctly under memcmp), but other cursors on the same
+  ** table might have pending mutations from prior operations. */
+  rc = flushIfNeeded(pCur);
+  if( rc!=SQLITE_OK ) return rc;
 
   refreshCursorRoot(pCur);
 
-  /* Initialize MutMap iterator if there are pending edits */
-  if( pCur->pMutMap && !prollyMutMapIsEmpty(pCur->pMutMap) ){
-    prollyMutMapIterFirst(&mutIter, pCur->pMutMap);
-    haveMutMap = prollyMutMapIterValid(&mutIter);
-  }
-
+  /*
+  ** For index btrees, the prolly tree stores serialized record blobs as keys.
+  ** We scan forward comparing each key with the UnpackedRecord using
+  ** sqlite3VdbeRecordCompare until we find a match or go past it.
+  */
   rc = prollyCursorFirst(&pCur->pCur, &res);
-  treeValid = (rc==SQLITE_OK && res==0);
-
-  if( !treeValid && !haveMutMap ){
+  if( rc!=SQLITE_OK || res!=0 ){
     *pRes = -1;
     pCur->eState = CURSOR_INVALID;
     return rc;
   }
 
-  /*
-  ** Merged scan: iterate tree and MutMap together in sorted order.
-  ** The tree and MutMap both store BLOBKEY entries sorted by memcmp.
-  ** We merge them, skipping tree entries overridden by MutMap DELETEs
-  ** and including MutMap INSERT entries not yet in the tree.
-  */
-  while( treeValid || haveMutMap ){
-    const u8 *pKey = NULL;
-    int nKey = 0;
-    int source = 0; /* 0=tree, 1=mutmap */
-    int cmp;
-
-    if( treeValid && haveMutMap ){
-      ProllyMutMapEntry *mutE = prollyMutMapIterEntry(&mutIter);
-      const u8 *treeKey;
-      int treeKeyLen;
-      int ord;
-      prollyCursorKey(&pCur->pCur, &treeKey, &treeKeyLen);
-      ord = blobKeyCompare(treeKey, treeKeyLen, mutE->pKey, mutE->nKey);
-
-      if( ord < 0 ){
-        /* Tree entry comes first. The merge guarantees no MutMap override
-        ** exists for this key (it would have been processed at ord==0). */
-        pKey = treeKey;
-        nKey = treeKeyLen;
-        source = 0;
-      } else if( ord > 0 ){
-        /* MutMap entry comes first */
-        if( mutE->op == PROLLY_EDIT_INSERT ){
-          pKey = mutE->pKey;
-          nKey = mutE->nKey;
-          source = 1;
-        } else {
-          /* DELETE for key not in tree — skip */
-          prollyMutMapIterNext(&mutIter);
-          haveMutMap = prollyMutMapIterValid(&mutIter);
-          continue;
-        }
-      } else {
-        /* Same key: MutMap overrides tree */
-        if( mutE->op == PROLLY_EDIT_DELETE ){
-          /* Skip both */
-          rc = prollyCursorNext(&pCur->pCur);
-          treeValid = (rc==SQLITE_OK
-                       && pCur->pCur.eState==PROLLY_CURSOR_VALID);
-          prollyMutMapIterNext(&mutIter);
-          haveMutMap = prollyMutMapIterValid(&mutIter);
-          continue;
-        } else {
-          /* INSERT overrides tree (updated value) — use MutMap entry */
-          pKey = mutE->pKey;
-          nKey = mutE->nKey;
-          source = 1;
-          /* Advance tree cursor past the overridden entry */
-          rc = prollyCursorNext(&pCur->pCur);
-          treeValid = (rc==SQLITE_OK
-                       && pCur->pCur.eState==PROLLY_CURSOR_VALID);
-        }
-      }
-    } else if( treeValid ){
-      prollyCursorKey(&pCur->pCur, &pKey, &nKey);
-      source = 0;
-    } else {
-      /* Only MutMap entries left */
-      ProllyMutMapEntry *mutE = prollyMutMapIterEntry(&mutIter);
-      if( mutE->op == PROLLY_EDIT_INSERT ){
-        pKey = mutE->pKey;
-        nKey = mutE->nKey;
-        source = 1;
-      } else {
-        prollyMutMapIterNext(&mutIter);
-        haveMutMap = prollyMutMapIterValid(&mutIter);
-        continue;
-      }
-    }
-
-    /* Compare with search key */
+  while( pCur->pCur.eState==PROLLY_CURSOR_VALID ){
+    const u8 *pKey;
+    int nKey;
+    prollyCursorKey(&pCur->pCur, &pKey, &nKey);
     pIdxKey->eqSeen = 0;
     cmp = sqlite3VdbeRecordCompare(nKey, pKey, pIdxKey);
     if( cmp==0 || pIdxKey->eqSeen ){
       *pRes = cmp;
-      if( source==1 ){
-        /* Position on MutMap entry: cache key as payload for reads */
-        if( pCur->cachedPayloadOwned && pCur->pCachedPayload ){
-          sqlite3_free(pCur->pCachedPayload);
-        }
-        pCur->pCachedPayload = sqlite3_malloc(nKey);
-        if( pCur->pCachedPayload ){
-          memcpy(pCur->pCachedPayload, pKey, nKey);
-          pCur->nCachedPayload = nKey;
-        } else {
-          pCur->nCachedPayload = 0;
-        }
-        pCur->cachedPayloadOwned = 1;
-      }
       pCur->eState = CURSOR_VALID;
       return SQLITE_OK;
-    } else if( cmp>0 ){
-      /* Stored key > search key: cursor points at a larger entry */
+    }else if( cmp>0 ){
       *pRes = cmp;
-      if( source==1 ){
-        if( pCur->cachedPayloadOwned && pCur->pCachedPayload ){
-          sqlite3_free(pCur->pCachedPayload);
-        }
-        pCur->pCachedPayload = sqlite3_malloc(nKey);
-        if( pCur->pCachedPayload ){
-          memcpy(pCur->pCachedPayload, pKey, nKey);
-          pCur->nCachedPayload = nKey;
-        } else {
-          pCur->nCachedPayload = 0;
-        }
-        pCur->cachedPayloadOwned = 1;
-      }
       pCur->eState = CURSOR_VALID;
       return SQLITE_OK;
     }
-
-    /* Advance the source that provided this entry */
-    if( source==0 ){
-      rc = prollyCursorNext(&pCur->pCur);
-      treeValid = (rc==SQLITE_OK
-                   && pCur->pCur.eState==PROLLY_CURSOR_VALID);
-    } else {
-      prollyMutMapIterNext(&mutIter);
-      haveMutMap = prollyMutMapIterValid(&mutIter);
-    }
+    rc = prollyCursorNext(&pCur->pCur);
+    if( rc!=SQLITE_OK ) break;
   }
-
   /* Ran off the end — all stored keys < search key.
   ** Position at the last entry if possible. */
   {
@@ -2262,7 +2134,7 @@ int sqlite3BtreeIndexMoveto(
     int rc2 = prollyCursorLast(&pCur->pCur, &lastRes);
     if( rc2==SQLITE_OK && lastRes==0 ){
       pCur->eState = CURSOR_VALID;
-      *pRes = -1;  /* Cursor at key smaller than target */
+      *pRes = -1;
     } else {
       pCur->eState = CURSOR_INVALID;
       *pRes = -1;
@@ -2278,6 +2150,14 @@ int sqlite3BtreeIndexMoveto(
 i64 sqlite3BtreeIntegerKey(BtCursor *pCur){
   assert( pCur->eState==CURSOR_VALID );
   assert( pCur->curIntKey );
+  /* When the seek was satisfied from the MutMap the prolly cursor may
+  ** not be positioned. Return the cached key only in that case.
+  ** If the prolly cursor IS valid, always read from it because
+  ** cachedIntKey may be stale after Next()/Previous(). */
+  if( !prollyCursorIsValid(&pCur->pCur)
+   && (pCur->curFlags & BTCF_ValidNKey) ){
+    return pCur->cachedIntKey;
+  }
   return prollyCursorIntKey(&pCur->pCur);
 }
 
@@ -2410,41 +2290,61 @@ int sqlite3BtreeInsert(
 
   if( rc!=SQLITE_OK ) return rc;
 
-  /* Defer flush for all non-master tables. The MutMap accumulates edits
+  /* Defer flush for persistent INTKEY data tables. The MutMap accumulates edits
   ** and they are flushed at commit time via flushAllPending. TableMoveto
-  ** and IndexMoveto check MutMap so reads see pending edits. */
-  if( pCur->pgnoRoot > 1 ){
-    if( (flags & BTREE_SAVEPOSITION) && pCur->curIntKey ){
-      /* INTKEY SAVEPOSITION: cache the inserted data so cursor reads work.
-      ** The cursor appears positioned on the newly inserted row. */
-      ProllyMutMapEntry *pEntry = prollyMutMapFind(
-          pCur->pMutMap, NULL, 0, pPayload->nKey);
-      pCur->eState = CURSOR_VALID;
-      pCur->curFlags |= BTCF_ValidNKey;
-      pCur->cachedIntKey = pPayload->nKey;
-      if( pCur->cachedPayloadOwned && pCur->pCachedPayload ){
-        sqlite3_free(pCur->pCachedPayload);
-      }
-      if( pEntry && pEntry->nVal > 0 && pEntry->pVal ){
-        pCur->pCachedPayload = sqlite3_malloc(pEntry->nVal);
-        if( pCur->pCachedPayload ){
-          memcpy(pCur->pCachedPayload, pEntry->pVal, pEntry->nVal);
-          pCur->nCachedPayload = pEntry->nVal;
-        } else {
-          pCur->nCachedPayload = 0;
+  ** checks MutMap so reads see pending edits.
+  ** BLOBKEY (index) tables flush immediately because SQLite's serialized
+  ** record format does NOT sort correctly under memcmp, making merge-scan
+  ** of tree+MutMap unreliable. Only defer for INTKEY tables.
+  ** Only defer for tables in aCommittedTables — ephemeral tables (CTE working
+  ** tables, autoindexes) need immediate writes. */
+  {
+    int canDefer = 0;
+    if( pCur->curIntKey && pCur->pgnoRoot > 1 ){
+      Btree *pBtree = pCur->pBtree;
+      if( pBtree->aCommittedTables ){
+        int i;
+        for(i = 0; i < pBtree->nCommittedTables; i++){
+          if( pBtree->aCommittedTables[i].iTable == pCur->pgnoRoot ){
+            canDefer = 1;
+            break;
+          }
         }
-      } else {
-        CLEAR_CACHED_PAYLOAD(pCur);
       }
-      pCur->cachedPayloadOwned = 1;
-    } else {
-      /* Non-SAVEPOSITION or BLOBKEY: cursor is not positioned */
-      pCur->eState = CURSOR_INVALID;
     }
-    return SQLITE_OK;
+    if( canDefer ){
+      if( (flags & BTREE_SAVEPOSITION) && pCur->curIntKey ){
+        /* INTKEY SAVEPOSITION: cache the inserted data so cursor reads work.
+        ** The cursor appears positioned on the newly inserted row. */
+        ProllyMutMapEntry *pEntry = prollyMutMapFind(
+            pCur->pMutMap, NULL, 0, pPayload->nKey);
+        pCur->eState = CURSOR_VALID;
+        pCur->curFlags |= BTCF_ValidNKey;
+        pCur->cachedIntKey = pPayload->nKey;
+        if( pCur->cachedPayloadOwned && pCur->pCachedPayload ){
+          sqlite3_free(pCur->pCachedPayload);
+        }
+        if( pEntry && pEntry->nVal > 0 && pEntry->pVal ){
+          pCur->pCachedPayload = sqlite3_malloc(pEntry->nVal);
+          if( pCur->pCachedPayload ){
+            memcpy(pCur->pCachedPayload, pEntry->pVal, pEntry->nVal);
+            pCur->nCachedPayload = pEntry->nVal;
+          } else {
+            pCur->nCachedPayload = 0;
+          }
+        } else {
+          CLEAR_CACHED_PAYLOAD(pCur);
+        }
+        pCur->cachedPayloadOwned = 1;
+      } else {
+        /* Non-SAVEPOSITION or BLOBKEY: cursor is not positioned */
+        pCur->eState = CURSOR_INVALID;
+      }
+      return SQLITE_OK;
+    }
   }
 
-  /* Master table (pgnoRoot==1): flush immediately for schema consistency */
+  /* Master table (pgnoRoot==1) and ephemeral tables: flush immediately */
   rc = flushMutMap(pCur);
   if( rc!=SQLITE_OK ) return rc;
   {
@@ -2484,8 +2384,47 @@ static int flushIfNeeded(BtCursor *pCur){
   int rc;
   struct TableEntry *pTE;
   int anyFlushed = 0;
+  int needFlush = 0;
 
-  /* First flush THIS cursor's pending mutations */
+  /* Check if any flush is needed before doing the expensive saveAllCursors */
+  if( pCur->pMutMap && !prollyMutMapIsEmpty(pCur->pMutMap) ){
+    needFlush = 1;
+  }
+  if( !needFlush ){
+    BtCursor *p;
+    for(p = pCur->pBt->pCursor; p; p = p->pNext){
+      if( p!=pCur && p->pgnoRoot==pCur->pgnoRoot
+       && p->pMutMap && !prollyMutMapIsEmpty(p->pMutMap) ){
+        needFlush = 1;
+        break;
+      }
+    }
+  }
+  if( !needFlush ) return SQLITE_OK;
+
+  /* Save or invalidate ALL other cursors on this table before rebuilding
+  ** the tree. Tree rebuild creates new nodes, invalidating any cursor's
+  ** cached prolly node pointers. */
+  {
+    BtCursor *p;
+    for(p = pCur->pBt->pCursor; p; p = p->pNext){
+      if( p!=pCur && p->pgnoRoot==pCur->pgnoRoot ){
+        if( !p->isPinned
+         && (p->eState==CURSOR_VALID || p->eState==CURSOR_SKIPNEXT) ){
+          p->isPinned = 1;
+          rc = saveCursorPosition(p);
+          p->isPinned = 0;
+          if( rc!=SQLITE_OK ) return rc;
+        } else if( p->eState!=CURSOR_REQUIRESEEK
+                && p->eState!=CURSOR_INVALID ){
+          /* Release any stale prolly node references */
+          prollyCursorReleaseAll(&p->pCur);
+        }
+      }
+    }
+  }
+
+  /* Flush THIS cursor's pending mutations */
   if( pCur->pMutMap && !prollyMutMapIsEmpty(pCur->pMutMap) ){
     rc = flushMutMap(pCur);
     if( rc!=SQLITE_OK ) return rc;
@@ -2605,7 +2544,15 @@ int sqlite3BtreeDelete(BtCursor *pCur, u8 flags){
   if( rc!=SQLITE_OK ) return rc;
 
   if( pCur->curIntKey ){
-    i64 intKey = prollyCursorIntKey(&pCur->pCur);
+    /* Use the cached integer key when available — the prolly cursor may
+    ** not be positioned if the seek was satisfied from the MutMap. */
+    i64 intKey;
+    if( !prollyCursorIsValid(&pCur->pCur)
+     && (pCur->curFlags & BTCF_ValidNKey) ){
+      intKey = pCur->cachedIntKey;
+    }else{
+      intKey = prollyCursorIntKey(&pCur->pCur);
+    }
     rc = prollyMutMapDelete(pCur->pMutMap, NULL, 0, intKey);
   } else {
     const u8 *pKey;
@@ -2623,34 +2570,57 @@ int sqlite3BtreeDelete(BtCursor *pCur, u8 flags){
 
   if( rc!=SQLITE_OK ) return rc;
 
-  /* Defer flush for non-master tables. The MutMap accumulates deletes and
-  ** they are flushed at commit time via flushAllPending. TableMoveto and
-  ** IndexMoveto check MutMap so reads see pending deletes. */
-  if( pCur->pgnoRoot > 1 ){
-    CLEAR_CACHED_PAYLOAD(pCur);
-    if( (flags & BTREE_SAVEPOSITION) && pCur->curIntKey ){
-      /* The cursor is positioned on the deleted entry in the tree.
-      ** The entry still exists in the tree (not flushed) but is marked
-      ** DELETE in MutMap. Set SKIPNEXT so Next() advances past it. */
-      pCur->eState = CURSOR_SKIPNEXT;
-      pCur->skipNext = 0;
-    } else {
-      pCur->eState = CURSOR_INVALID;
+  /* Defer flush for persistent INTKEY data tables, same as Insert. */
+  {
+    int canDefer = 0;
+    if( pCur->curIntKey && pCur->pgnoRoot > 1 ){
+      Btree *pBtree = pCur->pBtree;
+      if( pBtree->aCommittedTables ){
+        int i;
+        for(i = 0; i < pBtree->nCommittedTables; i++){
+          if( pBtree->aCommittedTables[i].iTable == pCur->pgnoRoot ){
+            canDefer = 1;
+            break;
+          }
+        }
+      }
     }
-    pCur->curFlags &= ~(BTCF_ValidNKey|BTCF_AtLast);
-    return SQLITE_OK;
+    if( canDefer ){
+      CLEAR_CACHED_PAYLOAD(pCur);
+      if( (flags & BTREE_SAVEPOSITION) && pCur->curIntKey ){
+        /* The cursor is positioned on the deleted entry in the tree.
+        ** The entry still exists in the tree (not flushed) but is marked
+        ** DELETE in MutMap. Set SKIPNEXT so Next() advances past it. */
+        pCur->eState = CURSOR_SKIPNEXT;
+        pCur->skipNext = 0;
+      } else {
+        pCur->eState = CURSOR_INVALID;
+      }
+      pCur->curFlags &= ~(BTCF_ValidNKey|BTCF_AtLast);
+      return SQLITE_OK;
+    }
   }
 
-  /* Master table (pgnoRoot==1): flush immediately for schema consistency */
+  /* Master table (pgnoRoot==1) and ephemeral tables: flush immediately */
   {
     i64 savedIntKey = 0;
     u8 *savedBlobKey = 0;
     int savedBlobKeyLen = 0;
     if( pCur->curIntKey ){
-      savedIntKey = prollyCursorIntKey(&pCur->pCur);
+      if( !prollyCursorIsValid(&pCur->pCur)
+       && (pCur->curFlags & BTCF_ValidNKey) ){
+        savedIntKey = pCur->cachedIntKey;
+      } else {
+        savedIntKey = prollyCursorIntKey(&pCur->pCur);
+      }
     } else {
       const u8 *pk; int nk;
-      prollyCursorKey(&pCur->pCur, &pk, &nk);
+      if( pCur->pCachedPayload && pCur->nCachedPayload > 0 ){
+        pk = pCur->pCachedPayload;
+        nk = pCur->nCachedPayload;
+      } else {
+        prollyCursorKey(&pCur->pCur, &pk, &nk);
+      }
       if( nk > 0 ){
         savedBlobKey = sqlite3_malloc(nk);
         if( savedBlobKey ){ memcpy(savedBlobKey, pk, nk); savedBlobKeyLen = nk; }
