@@ -324,11 +324,19 @@ static int csGrowPending(ChunkStore *cs){
 ** csGrowWriteBuf -- ensure the write buffer can hold nNeeded more bytes.
 ** -------------------------------------------------------------------- */
 static int csGrowWriteBuf(ChunkStore *cs, int nNeeded){
-  int nRequired = cs->nWriteBuf + nNeeded;
+  i64 nRequired = cs->nWriteBuf + (i64)nNeeded;
   if( nRequired > cs->nWriteBufAlloc ){
-    int nNew = cs->nWriteBufAlloc ? cs->nWriteBufAlloc : CS_INIT_WRITEBUF_SIZE;
-    while( nNew < nRequired ) nNew *= 2;
-    u8 *pNew = (u8 *)sqlite3_realloc(cs->pWriteBuf, nNew);
+    i64 nNew = cs->nWriteBufAlloc ? cs->nWriteBufAlloc : CS_INIT_WRITEBUF_SIZE;
+    /* Double for small buffers; grow by 50% once past 64 MB to avoid
+    ** excessive over-allocation for long-lived in-memory stores. */
+    while( nNew < nRequired ){
+      if( nNew < 64*1024*1024 ){
+        nNew *= 2;
+      }else{
+        nNew += nNew / 2;
+      }
+    }
+    u8 *pNew = (u8 *)sqlite3_realloc64(cs->pWriteBuf, (sqlite3_uint64)nNew);
     if( pNew == 0 ) return SQLITE_NOMEM;
     cs->pWriteBuf = pNew;
     cs->nWriteBufAlloc = nNew;
