@@ -2107,11 +2107,15 @@ int sqlite3BtreeIndexMoveto(
   ** VdbeRecordCompare against the search key, then pick the best match.
   */
 
-  /* ---- Pass 1: Scan tree for first entry >= search key ---- */
-  /* Skip any tree entry that is deleted in our MutMap. */
+  /* ---- Pass 1: Linear tree scan for first entry >= search key ---- */
+  /* Skips entries deleted in our MutMap.
+  ** NOTE: O(log N) binary search through prolly tree nodes is not possible
+  ** because entries within nodes are sorted by memcmp, which does NOT match
+  ** VdbeRecordCompare ordering. Linear scan is correct. */
   {
     int treeFound = 0;
     int treeCmp = 0;
+    int treeEqSeen = 0;
 
     rc = prollyCursorFirst(&pCur->pCur, &res);
     if( rc==SQLITE_OK && res==0 ){
@@ -2135,6 +2139,7 @@ int sqlite3BtreeIndexMoveto(
         cmp = sqlite3VdbeRecordCompare(nKey, pKey, pIdxKey);
         if( cmp==0 || pIdxKey->eqSeen ){
           treeCmp = cmp;
+          treeEqSeen = pIdxKey->eqSeen;
           treeFound = 1;
           break;
         }else if( cmp>0 ){
