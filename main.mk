@@ -2339,9 +2339,13 @@ sqlite3d$(T.exe):	shell.c $(LIBOBJS0)
 
 # Doltlite: the default binary name for this fork.
 # Uses non-amalgamation build with the prolly tree engine.
-doltlite$(T.exe):	shell.c $(LIBOBJS0)
+# Rename main→sqlite3_shell_main so our wrapper can provide main()
+shell_renamed.c: shell.c
+	sed 's/^int SQLITE_CDECL main(/int SQLITE_CDECL sqlite3_shell_main(/' shell.c > $@
+
+doltlite$(T.exe):	shell_renamed.c $(TOP)/src/shell_wrapper.c $(LIBOBJS0)
 	$(T.link) -o $@ \
-		shell.c $(LIBOBJS0) \
+		shell_renamed.c $(TOP)/src/shell_wrapper.c $(LIBOBJS0) \
 		$(CFLAGS.readline) $(SHELL_OPT) \
 		$(LDFLAGS.libsqlite3) $(LDFLAGS.readline)
 
