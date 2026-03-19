@@ -345,6 +345,54 @@ branches querying different data simultaneously.
 
 ## Performance
 
+### Sysbench OLTP Benchmarks: Doltlite vs SQLite
+
+Doltlite is a drop-in replacement for SQLite, so the natural question is: what
+does version control cost? The answer: almost nothing for reads, and a small
+multiplier for writes.
+
+Every PR runs a [sysbench-style benchmark](test/sysbench_compare.sh) comparing
+doltlite against stock SQLite on 23 OLTP workloads (10K rows, file-backed,
+single connection). Results are posted as a PR comment. These are the same
+benchmarks [Dolt](https://docs.dolthub.com/sql-reference/benchmarks/latency)
+uses to track performance.
+
+| Test | Multiplier | Category |
+|------|------------|----------|
+| oltp_read_only | 1 | Reads |
+| oltp_point_select | 1 | Reads |
+| oltp_range_select | 1 | Reads |
+| oltp_sum_range | 1 | Reads |
+| covering_index_scan | 1 | Reads |
+| index_join | 1 | Reads |
+| groupby_scan | 1 | Reads |
+| select_random_points | 1 | Reads |
+| select_random_ranges | 1 | Reads |
+| table_scan | 1 | Reads |
+| oltp_read_write | 1 | Mixed |
+| oltp_update_index | 2 | Writes |
+| oltp_update_non_index | 2 | Writes |
+| oltp_delete_insert | 2 | Writes |
+| oltp_write_only | 2 | Writes |
+| oltp_insert | 2 | Writes |
+| oltp_bulk_insert | 2 | Writes |
+
+**Reads are at parity.** The VDBE, query planner, parser, and all upper layers
+are untouched SQLite -- only the storage engine is replaced. For read
+workloads the prolly tree performs identically to the B-tree.
+
+**Writes are ~2x.** The prolly tree computes content-addressed hashes and
+manages an append-only chunk store, which adds overhead per mutation. This is
+the cost of structural sharing -- every write creates immutable chunks that
+enable O(changes) diff, branch, and merge.
+
+**This is the same tradeoff Dolt makes.** Dolt's sysbench multipliers are
+comparable (~1x reads, ~2-6x writes). The version control features (commits,
+branches, merges, diffs, time-travel) come at the cost of write amplification
+in the storage layer.
+
+### Algorithmic Complexity
+
 All numbers below have automated assertions in CI (`test/doltlite_perf.sh` and `test/doltlite_structural.sh`).
 
 - **O(log n) Point Operations** -- SELECT, UPDATE, and DELETE by primary key are O(log n), essentially constant time from 1K to 1M rows. Tested and asserted at 1K, 100K, and 1M rows.
