@@ -345,6 +345,59 @@ branches querying different data simultaneously.
 
 ## Performance
 
+### Sysbench OLTP Benchmarks: Doltlite vs SQLite
+
+Doltlite is a drop-in replacement for SQLite, so the natural question is: what
+does version control cost?
+
+Every PR runs a [sysbench-style benchmark](test/sysbench_compare.sh) comparing
+doltlite against stock SQLite on 23 OLTP workloads. Results are posted as a PR
+comment. These are the same benchmarks
+[Dolt](https://docs.dolthub.com/sql-reference/benchmarks/latency) uses to
+track performance against MySQL.
+
+| Test | Doltlite vs SQLite | Dolt vs MySQL |
+|------|-------------------|---------------|
+| oltp_read_only | 1.2 | 1.36 |
+| oltp_point_select | 1 | 1.35 |
+| oltp_range_select | 1.3 | -- |
+| oltp_sum_range | 1.2 | -- |
+| covering_index_scan | 1.3 | 0.28 |
+| index_join | 1.2 | 1.2 |
+| index_join_scan | 1.3 | 0.95 |
+| groupby_scan | 1.3 | 0.75 |
+| select_random_points | 2 | 1.51 |
+| select_random_ranges | 1 | 1.41 |
+| table_scan | 1 | 0.64 |
+| types_table_scan | 1 | 0.87 |
+| oltp_read_write | 58 | 1.24 |
+| oltp_update_index | 10 | 0.75 |
+| oltp_update_non_index | * | 0.75 |
+| oltp_delete_insert | 799 | 0.76 |
+| oltp_write_only | 440 | 1.15 |
+| oltp_insert | 364 | 0.75 |
+| oltp_bulk_insert | 1.3 | -- |
+| types_delete_insert | 37 | 0.79 |
+
+_\* = measurement pending. Dolt numbers from [docs.dolthub.com](https://docs.dolthub.com/sql-reference/benchmarks/latency)._
+
+**Reads are roughly at parity.** The VDBE, query planner, parser, and all
+upper layers are untouched SQLite -- only the storage engine is replaced. Read
+multipliers are 1-2x across the board.
+
+**Writes need work.** The prolly tree currently flushes chunks on every write
+operation rather than batching mutations, leading to high write multipliers
+(10-800x on heavy write workloads). This is not inherent to the architecture --
+Dolt achieves sub-2x write multipliers against MySQL using the same prolly tree
+design with proper write batching. Optimizing the write path is a top priority.
+
+**For comparison**, Dolt's sysbench results show that a mature prolly tree
+implementation achieves ~1x reads and ~0.75-1.5x writes against MySQL. The
+high doltlite write multipliers indicate optimization opportunities in the
+chunk store flush path, not a fundamental limitation of the storage engine.
+
+### Algorithmic Complexity
+
 All numbers below have automated assertions in CI (`test/doltlite_perf.sh` and `test/doltlite_structural.sh`).
 
 - **O(log n) Point Operations** -- SELECT, UPDATE, and DELETE by primary key are O(log n), essentially constant time from 1K to 1M rows. Tested and asserted at 1K, 100K, and 1M rows.
