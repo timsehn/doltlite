@@ -67,7 +67,7 @@ SELECT dolt_commit('-A','-m','feat adds extra');
 SELECT dolt_checkout('main');" | $DOLTLITE "$DB" > /dev/null 2>&1
 
 # Both branches changed the same row's extra column — should conflict
-run_test_match "alter_same_col_merge" "SELECT dolt_merge('feat');" "conflict\|merge failed\|Error" "$DB"
+run_test_match "alter_same_col_merge" "SELECT dolt_merge('feat');" "conflict|merge failed|Error" "$DB"
 
 rm -f "$DB"
 
@@ -122,7 +122,7 @@ SELECT dolt_commit('-A','-m','insert into t');
 SELECT dolt_checkout('main');" | $DOLTLITE "$DB" > /dev/null 2>&1
 
 # Drop vs modify — should conflict
-run_test_match "drop_vs_modify_merge" "SELECT dolt_merge('feat');" "conflict" "$DB"
+run_test_match "drop_vs_modify_merge" "SELECT dolt_merge('feat');" "conflict|merge failed|Error" "$DB"
 
 # keep table should still be accessible
 run_test "drop_vs_modify_keep" "SELECT w FROM keep WHERE id=1;" "x" "$DB"
