@@ -41,12 +41,10 @@ static int compareEntries(
     if( intKeyA > intKeyB ) return 1;
     return 0;
   }else{
-    int n = nKeyA < nKeyB ? nKeyA : nKeyB;
-    int c = memcmp(pKeyA, pKeyB, n);
-    if( c!=0 ) return c;
-    if( nKeyA < nKeyB ) return -1;
-    if( nKeyA > nKeyB ) return 1;
-    return 0;
+    /* Use SQLite record comparison for BLOBKEY entries. Raw memcmp
+    ** produces incorrect sort order because the serial type encoding
+    ** in the record header doesn't sort the same way as field values. */
+    return compareBlobKeys(pKeyA, nKeyA, pKeyB, nKeyB);
   }
 }
 

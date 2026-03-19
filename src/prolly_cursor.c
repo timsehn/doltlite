@@ -577,6 +577,10 @@ void prollyCursorReleaseAll(ProllyCursor *cur){
   }
   cur->nLevel = 0;
   cur->iLevel = 0;
+  /* Mark cursor invalid since all node references are released.
+  ** Without this, prollyCursorIsValid returns true but the cursor
+  ** has no valid node data, causing NULL dereferences. */
+  cur->eState = PROLLY_CURSOR_INVALID;
 }
 
 /*
@@ -591,6 +595,14 @@ void prollyCursorClose(ProllyCursor *cur){
   }
   cur->hasSavedPosition = 0;
   cur->eState = PROLLY_CURSOR_INVALID;
+}
+
+/*
+** Public wrapper for loadNode. Used by prolly_btree.c for custom seek.
+*/
+int prollyCursorLoadNode(ProllyCursor *cur, const ProllyHash *hash,
+                         ProllyCacheEntry **ppEntry){
+  return loadNode(cur, hash, ppEntry);
 }
 
 #endif /* DOLTLITE_PROLLY */
