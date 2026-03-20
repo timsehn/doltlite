@@ -608,12 +608,17 @@ static int applyEdits(
 
     /* Step 3: Serialize the modified leaf with re-chunking.
     **
-    ** Check if the serialized size exceeds PROLLY_CHUNK_MAX. If so,
-    ** feed entries through a mini-chunker which splits using rolling
-    ** hash boundaries. The mini-chunker produces a sub-tree whose
-    ** root replaces the old leaf in the parent.
+    ** Handles three cases:
+    **   - Underflow (< CHUNK_MIN): merge with adjacent sibling, re-chunk
+    **   - Normal: serialize directly as one chunk (fast path)
+    **   - Overflow (> CHUNK_MAX): split via mini-chunker
+    **
+    ** mergedSiblingIdx tracks which sibling was merged (-1 = none).
+    ** Step 4 uses this to remove the sibling's entry from the parent.
     */
     ProllyHash newHash;
+    int mergedSiblingIdx = -1;  /* parent index of merged sibling, or -1 */
+
     if( leafBuilder.nItems == 0 ){
       memset(&newHash, 0, sizeof(ProllyHash));
     }else{
@@ -621,12 +626,119 @@ static int applyEdits(
       int nTotal = 8 + nOff * 2 + leafBuilder.nKeyBytes
                    + leafBuilder.nValBytes;
 
+      /* Check for underflow: merge with sibling if leaf is too small
+      ** and we're in a multi-level tree (single-leaf trees can't merge) */
+      if( nTotal < PROLLY_CHUNK_MIN && leafLevel > 0 ){
+        ProllyNode *pParent = &cur.aLevel[leafLevel - 1].pEntry->node;
+        int childIdx = cur.aLevel[leafLevel - 1].idx;
+        int sibIdx = -1;
+        int sibBefore = 0;  /* 1 if sibling is to the left */
+
+        /* Prefer right sibling, fall back to left */
+        if( childIdx < pParent->nItems - 1 ){
+          sibIdx = childIdx + 1;
+        }else if( childIdx > 0 ){
+          sibIdx = childIdx - 1;
+          sibBefore = 1;
+        }
+
+        if( sibIdx >= 0 ){
+          /* Load sibling leaf */
+          ProllyHash sibHash;
+          prollyNodeChildHash(pParent, sibIdx, &sibHash);
+          ProllyCacheEntry *pSibEntry = 0;
+          rc = prollyCursorLoadNode(&cur, &sibHash, &pSibEntry);
+          if( rc!=SQLITE_OK ) goto leaf_err;
+
+          ProllyNode *pSib = &pSibEntry->node;
+
+          /* Build a combined builder: sibling entries + our entries
+          ** (or our entries + sibling, depending on order) */
+          ProllyNodeBuilder mergedBuilder;
+          prollyNodeBuilderInit(&mergedBuilder, 0, pMut->flags);
+
+          if( sibBefore ){
+            /* Left sibling first, then our entries */
+            int si;
+            for(si = 0; si < pSib->nItems; si++){
+              const u8 *pK; int nK;
+              const u8 *pV; int nV;
+              prollyNodeKey(pSib, si, &pK, &nK);
+              prollyNodeValue(pSib, si, &pV, &nV);
+              rc = prollyNodeBuilderAdd(&mergedBuilder, pK, nK, pV, nV);
+              if( rc!=SQLITE_OK ){
+                prollyNodeBuilderFree(&mergedBuilder);
+                prollyCacheRelease(cur.pCache, pSibEntry);
+                goto leaf_err;
+              }
+            }
+            /* Then our entries from leafBuilder */
+            int mi;
+            for(mi = 0; mi < leafBuilder.nItems; mi++){
+              u32 kO0 = leafBuilder.aKeyOff[mi];
+              u32 kO1 = leafBuilder.aKeyOff[mi + 1];
+              u32 vO0 = leafBuilder.aValOff[mi];
+              u32 vO1 = leafBuilder.aValOff[mi + 1];
+              rc = prollyNodeBuilderAdd(&mergedBuilder,
+                     leafBuilder.pKeyBuf + kO0, (int)(kO1 - kO0),
+                     leafBuilder.pValBuf + vO0, (int)(vO1 - vO0));
+              if( rc!=SQLITE_OK ){
+                prollyNodeBuilderFree(&mergedBuilder);
+                prollyCacheRelease(cur.pCache, pSibEntry);
+                goto leaf_err;
+              }
+            }
+          }else{
+            /* Our entries first, then right sibling */
+            int mi;
+            for(mi = 0; mi < leafBuilder.nItems; mi++){
+              u32 kO0 = leafBuilder.aKeyOff[mi];
+              u32 kO1 = leafBuilder.aKeyOff[mi + 1];
+              u32 vO0 = leafBuilder.aValOff[mi];
+              u32 vO1 = leafBuilder.aValOff[mi + 1];
+              rc = prollyNodeBuilderAdd(&mergedBuilder,
+                     leafBuilder.pKeyBuf + kO0, (int)(kO1 - kO0),
+                     leafBuilder.pValBuf + vO0, (int)(vO1 - vO0));
+              if( rc!=SQLITE_OK ){
+                prollyNodeBuilderFree(&mergedBuilder);
+                prollyCacheRelease(cur.pCache, pSibEntry);
+                goto leaf_err;
+              }
+            }
+            int si;
+            for(si = 0; si < pSib->nItems; si++){
+              const u8 *pK; int nK;
+              const u8 *pV; int nV;
+              prollyNodeKey(pSib, si, &pK, &nK);
+              prollyNodeValue(pSib, si, &pV, &nV);
+              rc = prollyNodeBuilderAdd(&mergedBuilder, pK, nK, pV, nV);
+              if( rc!=SQLITE_OK ){
+                prollyNodeBuilderFree(&mergedBuilder);
+                prollyCacheRelease(cur.pCache, pSibEntry);
+                goto leaf_err;
+              }
+            }
+          }
+          prollyCacheRelease(cur.pCache, pSibEntry);
+
+          /* Replace leafBuilder with mergedBuilder */
+          prollyNodeBuilderFree(&leafBuilder);
+          leafBuilder = mergedBuilder;
+          mergedSiblingIdx = sibIdx;
+
+          /* Recompute size for overflow/normal check below */
+          nOff = (leafBuilder.nItems + 1) * 4;
+          nTotal = 8 + nOff * 2 + leafBuilder.nKeyBytes
+                   + leafBuilder.nValBytes;
+        }
+      }
+
+      /* Now serialize: normal or overflow path */
       if( nTotal <= PROLLY_CHUNK_MAX ){
-        /* Fast path: fits in one chunk */
         rc = builderToChunk(&leafBuilder, pMut->pStore, &newHash);
         if( rc!=SQLITE_OK ) goto leaf_err;
       }else{
-        /* Leaf overflow: re-chunk through mini-chunker */
+        /* Overflow: re-chunk through mini-chunker */
         ProllyChunker splitCh;
         rc = prollyChunkerInit(&splitCh, pMut->pStore, pMut->flags);
         if( rc!=SQLITE_OK ) goto leaf_err;
@@ -681,12 +793,31 @@ static int applyEdits(
           const u8 *pK; int nK;
           const u8 *pV; int nV;
           prollyNodeKey(pAnc, k, &pK, &nK);
+
+          /* Skip the merged sibling (first ancestor level only) */
+          if( level == leafLevel - 1 && k == mergedSiblingIdx ){
+            continue;
+          }
+
           if( k == childIdx ){
             if( prollyHashIsEmpty(&newHash) ){
               continue;  /* Child deleted — skip */
             }
-            rc = prollyNodeBuilderAdd(&ancBuilder, pK, nK,
-                                      newHash.data, PROLLY_HASH_SIZE);
+            /* When we merged with a sibling, the new hash covers both
+            ** the old child and sibling.  Use the last key from the
+            ** rightmost of the two merged nodes. */
+            if( mergedSiblingIdx >= 0 && level == leafLevel - 1 ){
+              /* Use the larger of childIdx/siblingIdx key */
+              int lastIdx = childIdx > mergedSiblingIdx
+                            ? childIdx : mergedSiblingIdx;
+              const u8 *pLK; int nLK;
+              prollyNodeKey(pAnc, lastIdx, &pLK, &nLK);
+              rc = prollyNodeBuilderAdd(&ancBuilder, pLK, nLK,
+                                        newHash.data, PROLLY_HASH_SIZE);
+            }else{
+              rc = prollyNodeBuilderAdd(&ancBuilder, pK, nK,
+                                        newHash.data, PROLLY_HASH_SIZE);
+            }
           }else{
             prollyNodeValue(pAnc, k, &pV, &nV);
             rc = prollyNodeBuilderAdd(&ancBuilder, pK, nK, pV, nV);
