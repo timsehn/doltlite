@@ -401,6 +401,30 @@ void prollyChunkerGetRoot(ProllyChunker *ch, ProllyHash *pRoot){
 }
 
 /*
+** prollyChunkerAddAtLevel — Public wrapper for addToLevel.
+** Allows injecting entries at arbitrary levels of the chunker,
+** e.g. inserting (lastKey, childHash) at level 1 to skip
+** re-serializing unchanged leaf nodes.
+*/
+int prollyChunkerAddAtLevel(ProllyChunker *ch, int level,
+                            const u8 *pKey, int nKey,
+                            const u8 *pVal, int nVal){
+  return addToLevel(ch, level, pKey, nKey, pVal, nVal);
+}
+
+/*
+** prollyChunkerFlushLevel — Flush pending entries at a level.
+** If the level has items in its builder, serialize them into a chunk,
+** promote to the parent, and reset. This is needed before injecting
+** entries at a higher level to maintain consistency.
+*/
+int prollyChunkerFlushLevel(ProllyChunker *ch, int level){
+  if( level >= ch->nLevels ) return SQLITE_OK;
+  if( ch->aLevel[level].builder.nItems == 0 ) return SQLITE_OK;
+  return flushLevel(ch, level);
+}
+
+/*
 ** prollyChunkerFree — Free all resources held by the chunker.
 **
 ** Frees node builders and rolling hashes at every initialized level.

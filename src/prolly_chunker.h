@@ -62,4 +62,15 @@ void prollyChunkerGetRoot(ProllyChunker *ch, ProllyHash *pRoot);
 /* Free chunker resources */
 void prollyChunkerFree(ProllyChunker *ch);
 
+/* Add a key-value pair directly at a specific level of the chunker.
+** Used by applyEdits to inject unchanged subtree hashes at the parent
+** level, bypassing leaf-level re-serialization. */
+int prollyChunkerAddAtLevel(ProllyChunker *ch, int level,
+                            const u8 *pKey, int nKey,
+                            const u8 *pVal, int nVal);
+
+/* Flush any pending entries at the given level without finalizing.
+** Used before injecting at a higher level to ensure level consistency. */
+int prollyChunkerFlushLevel(ProllyChunker *ch, int level);
+
 #endif /* SQLITE_PROLLY_CHUNKER_H */

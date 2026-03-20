@@ -294,31 +294,144 @@ static int buildFromEdits(
 }
 
 /*
-** Merge-walk the existing tree with the edit map and produce a new tree.
-**
-** Algorithm outline:
-**   1. Open a cursor positioned at the first entry of the existing tree.
-**   2. Open an iterator positioned at the first edit in the MutMap.
-**   3. Initialize a chunker to accumulate the output stream.
-**   4. While either stream has remaining entries:
-**      a. Compare the current cursor key with the current edit key.
-**      b. Depending on the comparison result and the edit operation,
-**         either pass through the old entry, replace it, insert a new
-**         entry, delete an entry, or skip.
-**   5. Finalize the chunker to obtain the new root hash.
+** Helper: get the last key from a leaf node in chunker-compatible format.
+** For INTKEY, encodes as 8-byte LE into aKeyBuf (must be >= 8 bytes).
+** Sets *ppKey/*pnKey to the key bytes.
 */
-static int mergeWalk(
+static void leafLastKey(
+  const ProllyNode *pLeaf, u8 flags,
+  u8 *aKeyBuf, const u8 **ppKey, int *pnKey
+){
+  if( flags & PROLLY_NODE_INTKEY ){
+    i64 ik = prollyNodeIntKey(pLeaf, pLeaf->nItems - 1);
+    aKeyBuf[0] = (u8)(ik);      aKeyBuf[1] = (u8)(ik >> 8);
+    aKeyBuf[2] = (u8)(ik >> 16); aKeyBuf[3] = (u8)(ik >> 24);
+    aKeyBuf[4] = (u8)(ik >> 32); aKeyBuf[5] = (u8)(ik >> 40);
+    aKeyBuf[6] = (u8)(ik >> 48); aKeyBuf[7] = (u8)(ik >> 56);
+    *ppKey = aKeyBuf;
+    *pnKey = 8;
+  }else{
+    prollyNodeKey(pLeaf, pLeaf->nItems - 1, ppKey, pnKey);
+  }
+}
+
+/*
+** Merge one leaf's entries with edits and feed to chunker level 0.
+** Consumes edits from *pIter that fall within this leaf's key range.
+*/
+static int mergeLeafWithEdits(
+  ProllyMutator *pMut,
+  const ProllyNode *pLeaf,
+  ProllyMutMapIter *pIter,
+  ProllyChunker *pCh
+){
+  int rc = SQLITE_OK;
+  int j = 0;
+
+  while( j < pLeaf->nItems || prollyMutMapIterValid(pIter) ){
+    int haveOld = (j < pLeaf->nItems);
+    int haveEdit = prollyMutMapIterValid(pIter);
+    ProllyMutMapEntry *pEd = haveEdit ? prollyMutMapIterEntry(pIter) : 0;
+
+    if( haveOld && haveEdit ){
+      /* Check if edit is still within this leaf's range */
+      const u8 *pLK; int nLK; i64 iLK = 0;
+      if( pMut->flags & PROLLY_NODE_INTKEY ){
+        iLK = prollyNodeIntKey(pLeaf, pLeaf->nItems - 1);
+        pLK = 0; nLK = 0;
+      }else{
+        prollyNodeKey(pLeaf, pLeaf->nItems - 1, &pLK, &nLK);
+      }
+      if( compareKeys(pMut->flags, pLK, nLK, iLK,
+                      pEd->pKey, pEd->nKey, pEd->intKey) < 0 ){
+        /* Edit is past this leaf — copy remaining old entries */
+        const u8 *pOK; int nOK; i64 iOK = 0;
+        const u8 *pV; int nV;
+        if( pMut->flags & PROLLY_NODE_INTKEY ){
+          iOK = prollyNodeIntKey(pLeaf, j); pOK = 0; nOK = 0;
+        }else{
+          prollyNodeKey(pLeaf, j, &pOK, &nOK);
+        }
+        prollyNodeValue(pLeaf, j, &pV, &nV);
+        rc = feedChunker(pCh, pMut->flags, pOK, nOK, iOK, pV, nV);
+        if( rc!=SQLITE_OK ) return rc;
+        j++;
+        continue;
+      }
+
+      const u8 *pOK; int nOK; i64 iOK = 0;
+      if( pMut->flags & PROLLY_NODE_INTKEY ){
+        iOK = prollyNodeIntKey(pLeaf, j); pOK = 0; nOK = 0;
+      }else{
+        prollyNodeKey(pLeaf, j, &pOK, &nOK);
+      }
+      int cmp = compareKeys(pMut->flags, pOK, nOK, iOK,
+                            pEd->pKey, pEd->nKey, pEd->intKey);
+      if( cmp < 0 ){
+        const u8 *pV; int nV;
+        prollyNodeValue(pLeaf, j, &pV, &nV);
+        rc = feedChunker(pCh, pMut->flags, pOK, nOK, iOK, pV, nV);
+        if( rc!=SQLITE_OK ) return rc;
+        j++;
+      }else if( cmp == 0 ){
+        if( pEd->op==PROLLY_EDIT_INSERT ){
+          rc = feedChunker(pCh, pMut->flags, pEd->pKey, pEd->nKey,
+                           pEd->intKey, pEd->pVal, pEd->nVal);
+          if( rc!=SQLITE_OK ) return rc;
+        }
+        j++;
+        prollyMutMapIterNext(pIter);
+      }else{
+        if( pEd->op==PROLLY_EDIT_INSERT ){
+          rc = feedChunker(pCh, pMut->flags, pEd->pKey, pEd->nKey,
+                           pEd->intKey, pEd->pVal, pEd->nVal);
+          if( rc!=SQLITE_OK ) return rc;
+        }
+        prollyMutMapIterNext(pIter);
+      }
+    }else if( haveOld ){
+      const u8 *pOK; int nOK; i64 iOK = 0;
+      const u8 *pV; int nV;
+      if( pMut->flags & PROLLY_NODE_INTKEY ){
+        iOK = prollyNodeIntKey(pLeaf, j); pOK = 0; nOK = 0;
+      }else{
+        prollyNodeKey(pLeaf, j, &pOK, &nOK);
+      }
+      prollyNodeValue(pLeaf, j, &pV, &nV);
+      rc = feedChunker(pCh, pMut->flags, pOK, nOK, iOK, pV, nV);
+      if( rc!=SQLITE_OK ) return rc;
+      j++;
+    }else{
+      /* Edits past this leaf — break, caller handles them */
+      break;
+    }
+  }
+  return SQLITE_OK;
+}
+
+/*
+** Apply edits using targeted leaf modification with subtree skipping.
+**
+** Algorithm:
+**   1. Walk edits in sorted order.
+**   2. For each edit, seek cursor to the target leaf (O(log N)).
+**   3. Emit all unchanged leaves between the previous position and
+**      the current leaf directly at chunker level 1 (O(1) per leaf).
+**   4. Merge the target leaf's entries with edits through level 0.
+**   5. After all edits, emit remaining unchanged leaves at level 1.
+**   6. Finalize the chunker to get the new root.
+**
+** Total cost: O(M × log N) where M = edits, N = total entries.
+*/
+static int applyEdits(
   ProllyMutator *pMut
 ){
   ProllyCursor cur;
   ProllyMutMapIter iter;
   ProllyChunker chunker;
   int rc;
-  int curEmpty = 0;    /* set to 1 if cursor has no entries */
-  int curValid;        /* is cursor pointing at a valid entry? */
-  int iterValid;       /* is edit iterator pointing at a valid entry? */
+  int curEmpty = 0;
 
-  /* Initialize cursor on the existing tree */
   prollyCursorInit(&cur, pMut->pStore, pMut->pCache,
                    &pMut->oldRoot, pMut->flags);
   rc = prollyCursorFirst(&cur, &curEmpty);
@@ -326,164 +439,198 @@ static int mergeWalk(
     prollyCursorClose(&cur);
     return rc;
   }
-
-  /* If the existing tree turned out to be empty, fall back to
-  ** building from edits alone. */
   if( curEmpty ){
     prollyCursorClose(&cur);
     return buildFromEdits(pMut);
   }
 
-  /* Initialize the edit iterator */
   prollyMutMapIterFirst(&iter, pMut->pEdits);
 
-  /* Initialize the chunker */
+  int treeHeight = cur.nLevel;
+  int leafLevel = treeHeight - 1;
+
   rc = prollyChunkerInit(&chunker, pMut->pStore, pMut->flags);
   if( rc!=SQLITE_OK ){
     prollyCursorClose(&cur);
     return rc;
   }
 
-  /*
-  ** Main merge loop.
-  **
-  ** On each iteration we check whether the cursor and/or iterator are
-  ** still valid, fetch the current keys, compare, and decide which
-  ** entry (if any) to emit to the chunker.
-  */
-  for(;;){
-    curValid = prollyCursorIsValid(&cur);
-    iterValid = prollyMutMapIterValid(&iter);
-    if( !curValid && !iterValid ){
-      /* Both streams exhausted — done */
-      break;
-    }
+  /* For single-level trees (one leaf), just merge and rebuild.
+  ** No subtree skipping possible. */
+  if( treeHeight <= 1 ){
+    ProllyNode *pLeaf = &cur.aLevel[0].pEntry->node;
+    rc = mergeLeafWithEdits(pMut, pLeaf, &iter, &chunker);
+    if( rc!=SQLITE_OK ) goto apply_cleanup;
 
-    if( curValid && !iterValid ){
-      /*
-      ** Only the cursor has remaining entries. Copy current entry
-      ** through to the chunker unchanged and advance the cursor.
-      */
-      const u8 *pKey; int nKey;
-      const u8 *pVal; int nVal;
-      i64 intKey = 0;
-
-      if( pMut->flags & PROLLY_NODE_INTKEY ){
-        intKey = prollyCursorIntKey(&cur);
-        pKey = 0;
-        nKey = 0;
-      }else{
-        prollyCursorKey(&cur, &pKey, &nKey);
+    /* Trailing inserts */
+    while( prollyMutMapIterValid(&iter) ){
+      ProllyMutMapEntry *pEd = prollyMutMapIterEntry(&iter);
+      if( pEd->op==PROLLY_EDIT_INSERT ){
+        rc = feedChunker(&chunker, pMut->flags, pEd->pKey, pEd->nKey,
+                         pEd->intKey, pEd->pVal, pEd->nVal);
+        if( rc!=SQLITE_OK ) goto apply_cleanup;
       }
-      prollyCursorValue(&cur, &pVal, &nVal);
-
-      rc = feedChunker(&chunker, pMut->flags, pKey, nKey, intKey, pVal, nVal);
-      if( rc!=SQLITE_OK ) goto merge_cleanup;
-
-      rc = prollyCursorNext(&cur);
-      if( rc!=SQLITE_OK ) goto merge_cleanup;
-      continue;
-    }
-
-    if( !curValid && iterValid ){
-      /*
-      ** Only the iterator has remaining edits.
-      ** INSERT: feed to chunker.  DELETE: skip (key absent).
-      */
-      ProllyMutMapEntry *pEntry = prollyMutMapIterEntry(&iter);
-
-      if( pEntry->op==PROLLY_EDIT_INSERT ){
-        rc = feedChunker(&chunker, pMut->flags,
-                         pEntry->pKey, pEntry->nKey, pEntry->intKey,
-                         pEntry->pVal, pEntry->nVal);
-        if( rc!=SQLITE_OK ) goto merge_cleanup;
-      }
-      /* DELETE with no matching old entry: nothing to do */
-
       prollyMutMapIterNext(&iter);
-      continue;
     }
+    goto apply_finish;
+  }
 
-    /*
-    ** Both cursor and iterator are valid. Compare keys.
-    */
-    {
-      ProllyMutMapEntry *pEntry = prollyMutMapIterEntry(&iter);
-      const u8 *pCurKey; int nCurKey;
-      i64 iCurKey = 0;
-      int cmp;
+  /*
+  ** Multi-level tree.  Walk the lowest internal level (parent of
+  ** leaves).  For each internal node, use its keys to determine
+  ** which children contain edits WITHOUT loading unchanged children.
+  **
+  ** Internal node keys are the LAST key of each child subtree.
+  ** So child[i] covers keys from (key[i-1], key[i]].  We can
+  ** binary search to find which child an edit targets.
+  **
+  ** For ranges of children between edits, we inject their
+  ** (key, hash) directly at level 1 without loading them.
+  */
+  {
+    int parentLevel = leafLevel - 1;
 
-      if( pMut->flags & PROLLY_NODE_INTKEY ){
-        iCurKey = prollyCursorIntKey(&cur);
-        pCurKey = 0;
-        nCurKey = 0;
-      }else{
-        prollyCursorKey(&cur, &pCurKey, &nCurKey);
+    while( prollyCursorIsValid(&cur) ){
+      ProllyCacheEntry *pParentEntry = cur.aLevel[parentLevel].pEntry;
+      ProllyNode *pParent = &pParentEntry->node;
+      int startChild = cur.aLevel[parentLevel].idx;
+      int nChildren = pParent->nItems;
+
+      /* Find the range of children that contain edits.
+      ** Process children from startChild to nChildren-1.
+      ** For each child, check if the next edit falls within it
+      ** by comparing edit key against the parent's key for that child.
+      **
+      ** Parent key[i] = last key of child[i].
+      ** Edit is in child[i] if editKey <= parentKey[i] and
+      ** (i==0 or editKey > parentKey[i-1]).
+      */
+      int ci = startChild;
+      while( ci < nChildren ){
+        /* If no more edits, all remaining children are unchanged */
+        if( !prollyMutMapIterValid(&iter) ){
+          /* Inject remaining children directly at level 1 */
+          for(; ci < nChildren; ci++){
+            const u8 *pPK; int nPK;
+            ProllyHash childHash;
+            prollyNodeKey(pParent, ci, &pPK, &nPK);
+            prollyNodeChildHash(pParent, ci, &childHash);
+
+            rc = prollyChunkerFlushLevel(&chunker, 0);
+            if( rc!=SQLITE_OK ) goto apply_cleanup;
+            rc = prollyChunkerAddAtLevel(&chunker, 1,
+                   pPK, nPK, childHash.data, PROLLY_HASH_SIZE);
+            if( rc!=SQLITE_OK ) goto apply_cleanup;
+          }
+          break;
+        }
+
+        /* Check: does the next edit fall in child[ci]?
+        ** Parent key[ci] >= editKey means yes (or ci is the last child). */
+        ProllyMutMapEntry *pEd = prollyMutMapIterEntry(&iter);
+        const u8 *pPK; int nPK;
+        if( pMut->flags & PROLLY_NODE_INTKEY ){
+          i64 parentIntKey = prollyNodeIntKey(pParent, ci);
+          int cmp;
+          if( parentIntKey < pEd->intKey ) cmp = -1;
+          else if( parentIntKey > pEd->intKey ) cmp = 1;
+          else cmp = 0;
+          if( cmp < 0 && ci < nChildren - 1 ){
+            /* Edit is past this child — inject and skip */
+            ProllyHash childHash;
+            u8 aKeyBuf[8];
+            aKeyBuf[0] = (u8)(parentIntKey);
+            aKeyBuf[1] = (u8)(parentIntKey >> 8);
+            aKeyBuf[2] = (u8)(parentIntKey >> 16);
+            aKeyBuf[3] = (u8)(parentIntKey >> 24);
+            aKeyBuf[4] = (u8)(parentIntKey >> 32);
+            aKeyBuf[5] = (u8)(parentIntKey >> 40);
+            aKeyBuf[6] = (u8)(parentIntKey >> 48);
+            aKeyBuf[7] = (u8)(parentIntKey >> 56);
+            prollyNodeChildHash(pParent, ci, &childHash);
+
+            rc = prollyChunkerFlushLevel(&chunker, 0);
+            if( rc!=SQLITE_OK ) goto apply_cleanup;
+            rc = prollyChunkerAddAtLevel(&chunker, 1,
+                   aKeyBuf, 8, childHash.data, PROLLY_HASH_SIZE);
+            if( rc!=SQLITE_OK ) goto apply_cleanup;
+            ci++;
+            continue;
+          }
+        }else{
+          prollyNodeKey(pParent, ci, &pPK, &nPK);
+          int cmp = compareKeys(pMut->flags, pPK, nPK, 0,
+                                pEd->pKey, pEd->nKey, pEd->intKey);
+          if( cmp < 0 && ci < nChildren - 1 ){
+            /* Edit is past this child — inject and skip */
+            ProllyHash childHash;
+            prollyNodeChildHash(pParent, ci, &childHash);
+
+            rc = prollyChunkerFlushLevel(&chunker, 0);
+            if( rc!=SQLITE_OK ) goto apply_cleanup;
+            rc = prollyChunkerAddAtLevel(&chunker, 1,
+                   pPK, nPK, childHash.data, PROLLY_HASH_SIZE);
+            if( rc!=SQLITE_OK ) goto apply_cleanup;
+            ci++;
+            continue;
+          }
+        }
+
+        /* Edit targets this child (or this is the last child).
+        ** Load the leaf and merge. */
+        {
+          ProllyHash childHash;
+          prollyNodeChildHash(pParent, ci, &childHash);
+          ProllyCacheEntry *pChildEntry = 0;
+          rc = prollyCursorLoadNode(&cur, &childHash, &pChildEntry);
+          if( rc!=SQLITE_OK ) goto apply_cleanup;
+
+          rc = mergeLeafWithEdits(pMut, &pChildEntry->node, &iter, &chunker);
+          prollyCacheRelease(cur.pCache, pChildEntry);
+          if( rc!=SQLITE_OK ) goto apply_cleanup;
+          ci++;
+        }
       }
 
-      cmp = compareKeys(pMut->flags,
-                         pCurKey, nCurKey, iCurKey,
-                         pEntry->pKey, pEntry->nKey, pEntry->intKey);
+      /* Advance cursor past this parent to the next one */
+      {
+        ProllyHash lastChildHash;
+        prollyNodeChildHash(pParent, nChildren - 1, &lastChildHash);
+        ProllyCacheEntry *pLastChild = 0;
+        rc = prollyCursorLoadNode(&cur, &lastChildHash, &pLastChild);
+        if( rc!=SQLITE_OK ) goto apply_cleanup;
 
-      if( cmp < 0 ){
-        /*
-        ** Cursor key < edit key. The old entry is unchanged.
-        ** Pass it through and advance the cursor.
-        */
-        const u8 *pVal; int nVal;
-        prollyCursorValue(&cur, &pVal, &nVal);
-
-        rc = feedChunker(&chunker, pMut->flags,
-                         pCurKey, nCurKey, iCurKey, pVal, nVal);
-        if( rc!=SQLITE_OK ) goto merge_cleanup;
+        if( cur.aLevel[leafLevel].pEntry ){
+          prollyCacheRelease(cur.pCache, cur.aLevel[leafLevel].pEntry);
+        }
+        cur.aLevel[leafLevel].pEntry = pLastChild;
+        cur.aLevel[leafLevel].idx = pLastChild->node.nItems - 1;
+        cur.aLevel[parentLevel].idx = nChildren - 1;
 
         rc = prollyCursorNext(&cur);
-        if( rc!=SQLITE_OK ) goto merge_cleanup;
-
-      }else if( cmp == 0 ){
-        /*
-        ** Keys are equal. The edit replaces or deletes the old entry.
-        */
-        if( pEntry->op==PROLLY_EDIT_INSERT ){
-          /* Replace: emit edit's value with the key */
-          rc = feedChunker(&chunker, pMut->flags,
-                           pEntry->pKey, pEntry->nKey, pEntry->intKey,
-                           pEntry->pVal, pEntry->nVal);
-          if( rc!=SQLITE_OK ) goto merge_cleanup;
-        }
-        /* DELETE: skip both — entry removed from new tree */
-
-        /* Advance both streams past this key */
-        rc = prollyCursorNext(&cur);
-        if( rc!=SQLITE_OK ) goto merge_cleanup;
-        prollyMutMapIterNext(&iter);
-
-      }else{
-        /*
-        ** Cursor key > edit key. The edit references a key that does
-        ** not exist in the old tree at this position.
-        */
-        if( pEntry->op==PROLLY_EDIT_INSERT ){
-          /* New entry: emit it */
-          rc = feedChunker(&chunker, pMut->flags,
-                           pEntry->pKey, pEntry->nKey, pEntry->intKey,
-                           pEntry->pVal, pEntry->nVal);
-          if( rc!=SQLITE_OK ) goto merge_cleanup;
-        }
-        /* DELETE of non-existent key: silently skip */
-
-        prollyMutMapIterNext(&iter);
+        if( rc!=SQLITE_OK ) goto apply_cleanup;
       }
     }
   }
 
-  /* Finalize the chunker to build the tree and obtain the root. */
+  /* Handle trailing inserts past end of tree */
+  while( prollyMutMapIterValid(&iter) ){
+    ProllyMutMapEntry *pEd = prollyMutMapIterEntry(&iter);
+    if( pEd->op==PROLLY_EDIT_INSERT ){
+      rc = feedChunker(&chunker, pMut->flags, pEd->pKey, pEd->nKey,
+                       pEd->intKey, pEd->pVal, pEd->nVal);
+      if( rc!=SQLITE_OK ) goto apply_cleanup;
+    }
+    prollyMutMapIterNext(&iter);
+  }
+
+apply_finish:
   rc = prollyChunkerFinish(&chunker);
   if( rc==SQLITE_OK ){
     prollyChunkerGetRoot(&chunker, &pMut->newRoot);
   }
 
-merge_cleanup:
+apply_cleanup:
   prollyChunkerFree(&chunker);
   prollyCursorClose(&cur);
   return rc;
@@ -512,8 +659,8 @@ int prollyMutateFlush(ProllyMutator *pMut){
     return buildFromEdits(pMut);
   }
 
-  /* Case 3: merge old tree with edits */
-  return mergeWalk(pMut);
+  /* Case 3: targeted leaf edits */
+  return applyEdits(pMut);
 }
 
 /*
