@@ -606,20 +606,67 @@ static int applyEdits(
       }
     }
 
-    /* Step 3: Serialize new leaf */
+    /* Step 3: Serialize the modified leaf with re-chunking.
+    **
+    ** Check if the serialized size exceeds PROLLY_CHUNK_MAX. If so,
+    ** feed entries through a mini-chunker which splits using rolling
+    ** hash boundaries. The mini-chunker produces a sub-tree whose
+    ** root replaces the old leaf in the parent.
+    */
     ProllyHash newHash;
     if( leafBuilder.nItems == 0 ){
-      /* Leaf became empty (all entries deleted).  Set hash to empty.
-      ** The ancestor rewrite will handle removing the child ref. */
       memset(&newHash, 0, sizeof(ProllyHash));
     }else{
-      rc = builderToChunk(&leafBuilder, pMut->pStore, &newHash);
-      if( rc!=SQLITE_OK ) goto leaf_err;
+      int nOff = (leafBuilder.nItems + 1) * 4;
+      int nTotal = 8 + nOff * 2 + leafBuilder.nKeyBytes
+                   + leafBuilder.nValBytes;
+
+      if( nTotal <= PROLLY_CHUNK_MAX ){
+        /* Fast path: fits in one chunk */
+        rc = builderToChunk(&leafBuilder, pMut->pStore, &newHash);
+        if( rc!=SQLITE_OK ) goto leaf_err;
+      }else{
+        /* Leaf overflow: re-chunk through mini-chunker */
+        ProllyChunker splitCh;
+        rc = prollyChunkerInit(&splitCh, pMut->pStore, pMut->flags);
+        if( rc!=SQLITE_OK ) goto leaf_err;
+
+        int ei;
+        for(ei = 0; ei < leafBuilder.nItems; ei++){
+          u32 kO0 = leafBuilder.aKeyOff[ei];
+          u32 kO1 = leafBuilder.aKeyOff[ei + 1];
+          u32 vO0 = leafBuilder.aValOff[ei];
+          u32 vO1 = leafBuilder.aValOff[ei + 1];
+          rc = prollyChunkerAdd(&splitCh,
+                 leafBuilder.pKeyBuf + kO0, (int)(kO1 - kO0),
+                 leafBuilder.pValBuf + vO0, (int)(vO1 - vO0));
+          if( rc!=SQLITE_OK ){
+            prollyChunkerFree(&splitCh);
+            goto leaf_err;
+          }
+        }
+        rc = prollyChunkerFinish(&splitCh);
+        if( rc==SQLITE_OK ){
+          memcpy(&newHash, &splitCh.root, sizeof(ProllyHash));
+        }
+        prollyChunkerFree(&splitCh);
+        if( rc!=SQLITE_OK ) goto leaf_err;
+      }
     }
     prollyNodeBuilderFree(&leafBuilder);
 
-    /* Step 4: Walk UP ancestor chain, replacing child hashes */
-    {
+    /* Step 4: Walk UP ancestor chain, replacing child hashes.
+    **
+    ** For single-leaf trees (leafLevel == 0), the leaf IS the root,
+    ** so newHash is already the new root — skip ancestor rewrite.
+    **
+    ** For multi-level trees, clone each ancestor, replace the child
+    ** hash, and re-chunk if the ancestor overflows CHUNK_MAX.
+    */
+    if( leafLevel == 0 ){
+      /* Single leaf = root. newHash is the new root. */
+      memcpy(&currentRoot, &newHash, sizeof(ProllyHash));
+    }else{
       int level;
       for(level = leafLevel - 1; level >= 0; level--){
         ProllyNode *pAnc = &cur.aLevel[level].pEntry->node;
@@ -629,19 +676,15 @@ static int applyEdits(
         prollyNodeBuilderInit(&ancBuilder, (u8)(pAnc->level),
                               pMut->flags);
 
-        /* Copy all entries, replacing the child hash at childIdx */
         int k;
         for(k = 0; k < pAnc->nItems; k++){
           const u8 *pK; int nK;
           const u8 *pV; int nV;
           prollyNodeKey(pAnc, k, &pK, &nK);
           if( k == childIdx ){
-            /* Check if child was deleted (empty hash) */
             if( prollyHashIsEmpty(&newHash) ){
-              /* Skip this entry — child was deleted */
-              continue;
+              continue;  /* Child deleted — skip */
             }
-            /* Replace with new child hash */
             rc = prollyNodeBuilderAdd(&ancBuilder, pK, nK,
                                       newHash.data, PROLLY_HASH_SIZE);
           }else{
@@ -656,23 +699,55 @@ static int applyEdits(
         }
 
         if( ancBuilder.nItems == 0 ){
-          /* Ancestor became empty — propagate up */
           memset(&newHash, 0, sizeof(ProllyHash));
           prollyNodeBuilderFree(&ancBuilder);
           continue;
         }
 
-        rc = builderToChunk(&ancBuilder, pMut->pStore, &newHash);
-        prollyNodeBuilderFree(&ancBuilder);
+        /* Re-chunk ancestor if it overflows */
+        int aOff = (ancBuilder.nItems + 1) * 4;
+        int aTotal = 8 + aOff * 2 + ancBuilder.nKeyBytes
+                     + ancBuilder.nValBytes;
+
+        if( aTotal <= PROLLY_CHUNK_MAX ){
+          rc = builderToChunk(&ancBuilder, pMut->pStore, &newHash);
+          prollyNodeBuilderFree(&ancBuilder);
+        }else{
+          /* Ancestor overflow: re-chunk */
+          ProllyChunker ancSplitCh;
+          rc = prollyChunkerInit(&ancSplitCh, pMut->pStore, pMut->flags);
+          if( rc!=SQLITE_OK ){
+            prollyNodeBuilderFree(&ancBuilder);
+            prollyCursorClose(&cur);
+            return rc;
+          }
+          int ei;
+          for(ei = 0; ei < ancBuilder.nItems; ei++){
+            u32 kO0 = ancBuilder.aKeyOff[ei];
+            u32 kO1 = ancBuilder.aKeyOff[ei + 1];
+            u32 vO0 = ancBuilder.aValOff[ei];
+            u32 vO1 = ancBuilder.aValOff[ei + 1];
+            rc = prollyChunkerAddAtLevel(&ancSplitCh,
+                   (int)pAnc->level,
+                   ancBuilder.pKeyBuf + kO0, (int)(kO1 - kO0),
+                   ancBuilder.pValBuf + vO0, (int)(vO1 - vO0));
+            if( rc!=SQLITE_OK ) break;
+          }
+          if( rc==SQLITE_OK ) rc = prollyChunkerFinish(&ancSplitCh);
+          if( rc==SQLITE_OK ){
+            memcpy(&newHash, &ancSplitCh.root, sizeof(ProllyHash));
+          }
+          prollyChunkerFree(&ancSplitCh);
+          prollyNodeBuilderFree(&ancBuilder);
+        }
+
         if( rc!=SQLITE_OK ){
           prollyCursorClose(&cur);
           return rc;
         }
       }
+      memcpy(&currentRoot, &newHash, sizeof(ProllyHash));
     }
-
-    /* newHash is now the new root */
-    memcpy(&currentRoot, &newHash, sizeof(ProllyHash));
     prollyCursorClose(&cur);
     continue;
 
