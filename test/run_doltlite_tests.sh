@@ -49,14 +49,8 @@ TESTS=(
   doltlite_e2e.sh
 )
 
-# Suites with known failures (GC reclaims chunks still needed by
-# virtual tables like dolt_diff/dolt_at/dolt_history after GC).
-# These don't block CI — failures are reported but don't cause exit 1.
-KNOWN_ISSUES="doltlite_gc.sh doltlite_branch_gc_stress.sh doltlite_feature_deep.sh doltlite_at.sh"
-
 total_pass=0
 total_fail=0
-total_known=0
 failed=""
 
 for t in "${TESTS[@]}"; do
@@ -64,9 +58,6 @@ for t in "${TESTS[@]}"; do
   echo "━━━ $t ━━━"
   if bash "../test/$t"; then
     total_pass=$((total_pass + 1))
-  elif echo "$KNOWN_ISSUES" | grep -qw "$t"; then
-    total_known=$((total_known + 1))
-    echo "KNOWN ISSUE: $t (GC-related, non-blocking)"
   else
     total_fail=$((total_fail + 1))
     failed="$failed $t"
@@ -76,7 +67,7 @@ done
 
 echo ""
 echo "════════════════════════════════════════"
-echo "Doltlite tests: $total_pass passed, $total_fail failed, $total_known known issues out of $((total_pass + total_fail + total_known)) suites"
+echo "Doltlite tests: $total_pass passed, $total_fail failed out of $((total_pass + total_fail)) suites"
 if [ $total_fail -gt 0 ]; then
   echo "Failures:$failed"
   echo "════════════════════════════════════════"
