@@ -200,9 +200,8 @@ run_test_match "gc_diff_works" \
   "SELECT count(*) FROM dolt_diff('t', (SELECT commit_hash FROM dolt_log LIMIT 1 OFFSET 1), (SELECT commit_hash FROM dolt_log LIMIT 1));" \
   "^[1-9]" "$DB"
 
-# Working diff works
-# SKIP: dolt_diff with uncommitted deferred writes across CLI invocations
-# is a known issue from the deferred writes implementation (PR #66).
+# Working diff: INSERT autocommits at SQL level but is not dolt-committed,
+# so dolt_diff('t') should show it as a working change. (do-qks)
 # echo "INSERT INTO t VALUES(3,'c');" | $DOLTLITE "$DB" > /dev/null 2>&1
 # run_test "gc_diff_working" "SELECT count(*) FROM dolt_diff('t');" "1" "$DB"
 
