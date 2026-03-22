@@ -51,6 +51,7 @@ jobs:
   # ── Binary builds (per-platform) ─────────────────────────
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -72,7 +73,7 @@ jobs:
             target: win-x64
             ext: ".exe"
             lib_ext: ".dll"
-            static_ext: ".lib"
+            static_ext: ".a"
 
     runs-on: ${{ matrix.os }}
 
@@ -94,18 +95,25 @@ jobs:
         ../configure
         make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) doltlite doltlite-lib
 
+    - name: Setup MSYS2 (Windows)
+      if: runner.os == 'Windows'
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: false
+        install: >-
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-zlib
+          make
+          tcl
+
     - name: Build (Windows)
       if: runner.os == 'Windows'
-      shell: cmd
+      shell: msys2 {0}
       run: |
-        mkdir build
-        cd build
-        copy ..\Makefile.msc Makefile
-        nmake /f Makefile TOP=.. DOLTLITE_PROLLY=1 doltlite.exe libdoltlite.lib 2>nul || (
-          REM Fallback: build amalgamation directly
-          ..\configure
-          make doltlite doltlite-lib
-        )
+        mkdir -p build && cd build
+        ../configure
+        make -j$(nproc) doltlite doltlite-lib
 
     - name: Package CLI tools
       shell: bash
@@ -174,16 +182,10 @@ jobs:
         find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) -exec mv {} . \;
         ls -la *.zip *.tar.gz
 
+        # Upload all artifacts that were successfully built
+        ASSETS=$(find . -maxdepth 1 \( -name "*.zip" -o -name "*.tar.gz" \) -print)
+        echo "Uploading: ${ASSETS}"
         gh release create "${GITHUB_REF_NAME}" \
           --title "Doltlite ${VERSION}" \
           --generate-notes \
-          doltlite-amalgamation-${VERSION}.zip \
-          doltlite-autoconf-${VERSION}.tar.gz \
-          doltlite-tools-linux-x64-${VERSION}.zip \
-          doltlite-tools-osx-arm64-${VERSION}.zip \
-          doltlite-tools-osx-x64-${VERSION}.zip \
-          doltlite-tools-win-x64-${VERSION}.zip \
-          doltlite-lib-linux-x64-${VERSION}.zip \
-          doltlite-lib-osx-arm64-${VERSION}.zip \
-          doltlite-lib-osx-x64-${VERSION}.zip \
-          doltlite-lib-win-x64-${VERSION}.zip
+          ${ASSETS}
