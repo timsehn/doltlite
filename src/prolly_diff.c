@@ -204,7 +204,7 @@ static int diffSerialTypeSize(u64 st){
 ** Returns non-zero if the records are logically equal.
 ** Returns 0 (not equal) if either record is malformed.
 */
-static int diffRecordsEqualFieldwise(
+int diffRecordsEqualFieldwise(
   const u8 *pA, int nA,
   const u8 *pB, int nB
 ){
