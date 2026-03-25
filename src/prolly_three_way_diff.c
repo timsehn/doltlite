@@ -115,12 +115,18 @@ static int diffEntryKeyCmp(const DiffEntry *pA, const DiffEntry *pB, u8 flags){
 }
 
 /*
-** Compare two blobs for equality.
+** Compare two values for equality, with field-wise fallback.
+** Fast path: same length and same bytes.  Slow path: parse SQLite
+** record format to compare field-by-field, tolerating trailing NULL
+** differences from ALTER TABLE ADD COLUMN.
 */
-static int blobsEqual(const u8 *pA, int nA, const u8 *pB, int nB){
-  if( nA!=nB ) return 0;
-  if( nA==0 ) return 1;
-  return memcmp(pA, pB, nA)==0;
+static int valuesEqual(const u8 *pA, int nA, const u8 *pB, int nB){
+  if( nA==nB ){
+    if( nA==0 ) return 1;
+    if( memcmp(pA, pB, nA)==0 ) return 1;
+  }
+  if( nA < 2 || nB < 2 ) return 0;
+  return diffRecordsEqualFieldwise(pA, nA, pB, nB);
 }
 
 /*
@@ -215,8 +221,8 @@ static int emitBothSides(
 
   /* Both ADD: check if they added the same value */
   if( pLeft->type==PROLLY_DIFF_ADD && pRight->type==PROLLY_DIFF_ADD ){
-    if( blobsEqual(pLeft->pNewVal, pLeft->nNewVal,
-                   pRight->pNewVal, pRight->nNewVal) ){
+    if( valuesEqual(pLeft->pNewVal, pLeft->nNewVal,
+                    pRight->pNewVal, pRight->nNewVal) ){
       change.type = THREE_WAY_CONVERGENT;
       change.pOurVal = pLeft->pNewVal;
       change.nOurVal = pLeft->nNewVal;
@@ -248,8 +254,8 @@ static int emitBothSides(
     change.nOurVal = pLeft->nNewVal;
     change.pTheirVal = pRight->pNewVal;
     change.nTheirVal = pRight->nNewVal;
-    if( blobsEqual(pLeft->pNewVal, pLeft->nNewVal,
-                   pRight->pNewVal, pRight->nNewVal) ){
+    if( valuesEqual(pLeft->pNewVal, pLeft->nNewVal,
+                    pRight->pNewVal, pRight->nNewVal) ){
       change.type = THREE_WAY_CONVERGENT;
     }else{
       change.type = THREE_WAY_CONFLICT_MM;

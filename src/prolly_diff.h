@@ -44,4 +44,11 @@ int prollyDiff(ChunkStore *pStore, ProllyCache *pCache,
                const ProllyHash *pOldRoot, const ProllyHash *pNewRoot,
                u8 flags, ProllyDiffCallback xCallback, void *pCtx);
 
+/*
+** Compare two SQLite record-format values field-by-field, treating
+** trailing NULL fields as equal to missing fields.  Returns non-zero
+** if the records are logically equal.
+*/
+int diffRecordsEqualFieldwise(const u8 *pA, int nA, const u8 *pB, int nB);
+
 #endif /* SQLITE_PROLLY_DIFF_H */
