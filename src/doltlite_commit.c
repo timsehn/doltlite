@@ -21,18 +21,33 @@ int doltliteCommitSerialize(const DoltliteCommit *c, u8 **ppOut, int *pnOut){
   int nName = c->zName ? (int)strlen(c->zName) : 0;
   int nEmail = c->zEmail ? (int)strlen(c->zEmail) : 0;
   int nMsg = c->zMessage ? (int)strlen(c->zMessage) : 0;
-  int sz = 1 + 20 + 20 + 20 + 8 + 2 + nName + 2 + nEmail + 2 + nMsg;
+  int nPar = c->nParents > 0 ? c->nParents : (prollyHashIsEmpty(&c->parentHash) ? 0 : 1);
+  /* V2: version(1) + nParents(1) + parents(20*N) + catalog(20) + ts(8) + strings */
+  int sz = 1 + 1 + PROLLY_HASH_SIZE*nPar + PROLLY_HASH_SIZE + 8
+         + 2 + nName + 2 + nEmail + 2 + nMsg;
   u8 *buf = sqlite3_malloc(sz);
   u8 *p;
+  int i;
   if( !buf ) return SQLITE_NOMEM;
   p = buf;
 
   /* version */
-  *p++ = DOLTLITE_COMMIT_VERSION;
+  *p++ = DOLTLITE_COMMIT_V2;
 
-  /* parent, root, catalog hashes */
-  memcpy(p, c->parentHash.data, PROLLY_HASH_SIZE); p += PROLLY_HASH_SIZE;
-  memcpy(p, c->rootHash.data, PROLLY_HASH_SIZE); p += PROLLY_HASH_SIZE;
+  /* nParents + parent hashes */
+  *p++ = (u8)nPar;
+  if( nPar > 0 && c->nParents > 0 ){
+    for(i=0; i<nPar; i++){
+      memcpy(p, c->aParents[i].data, PROLLY_HASH_SIZE);
+      p += PROLLY_HASH_SIZE;
+    }
+  }else if( nPar == 1 ){
+    /* Legacy: single parent from parentHash field */
+    memcpy(p, c->parentHash.data, PROLLY_HASH_SIZE);
+    p += PROLLY_HASH_SIZE;
+  }
+
+  /* catalog hash (no rootHash in V2) */
   memcpy(p, c->catalogHash.data, PROLLY_HASH_SIZE); p += PROLLY_HASH_SIZE;
 
   /* timestamp */
@@ -51,24 +66,56 @@ int doltliteCommitSerialize(const DoltliteCommit *c, u8 **ppOut, int *pnOut){
   if( nMsg>0 ){ memcpy(p, c->zMessage, nMsg); p += nMsg; }
 
   *ppOut = buf;
-  *pnOut = sz;
+  *pnOut = (int)(p - buf);
   return SQLITE_OK;
 }
 
 int doltliteCommitDeserialize(const u8 *data, int nData, DoltliteCommit *c){
   const u8 *p = data;
   int nName, nEmail, nMsg;
+  int version;
+  int i;
 
   memset(c, 0, sizeof(*c));
-  if( nData < 1+20+20+20+8+2+2+2 ) return SQLITE_CORRUPT;
+  if( nData < 1 ) return SQLITE_CORRUPT;
 
-  /* version */
-  if( *p++ != DOLTLITE_COMMIT_VERSION ) return SQLITE_CORRUPT;
+  version = *p++;
 
-  /* hashes */
-  memcpy(c->parentHash.data, p, PROLLY_HASH_SIZE); p += PROLLY_HASH_SIZE;
-  memcpy(c->rootHash.data, p, PROLLY_HASH_SIZE); p += PROLLY_HASH_SIZE;
-  memcpy(c->catalogHash.data, p, PROLLY_HASH_SIZE); p += PROLLY_HASH_SIZE;
+  if( version == DOLTLITE_COMMIT_V1 ){
+    /* V1: parent(20) + root(20) + catalog(20) + ts(8) + strings */
+    if( nData < 1+20+20+20+8+2+2+2 ) return SQLITE_CORRUPT;
+    memcpy(c->parentHash.data, p, PROLLY_HASH_SIZE); p += PROLLY_HASH_SIZE;
+    memcpy(c->rootHash.data, p, PROLLY_HASH_SIZE); p += PROLLY_HASH_SIZE;
+    memcpy(c->catalogHash.data, p, PROLLY_HASH_SIZE); p += PROLLY_HASH_SIZE;
+    /* Populate aParents from V1 single parent */
+    if( !prollyHashIsEmpty(&c->parentHash) ){
+      c->aParents[0] = c->parentHash;
+      c->nParents = 1;
+    }else{
+      c->nParents = 0;
+    }
+  }else if( version == DOLTLITE_COMMIT_V2 ){
+    /* V2: nParents(1) + parents(20*N) + catalog(20) + ts(8) + strings */
+    int nPar;
+    if( nData < 3 ) return SQLITE_CORRUPT;
+    nPar = *p++;
+    if( nPar > DOLTLITE_MAX_PARENTS ) return SQLITE_CORRUPT;
+    if( p + nPar*PROLLY_HASH_SIZE + PROLLY_HASH_SIZE + 8 + 6 > data + nData ){
+      return SQLITE_CORRUPT;
+    }
+    c->nParents = nPar;
+    for(i=0; i<nPar; i++){
+      memcpy(c->aParents[i].data, p, PROLLY_HASH_SIZE);
+      p += PROLLY_HASH_SIZE;
+    }
+    /* Set parentHash to first parent for convenience */
+    if( nPar > 0 ) c->parentHash = c->aParents[0];
+    /* catalog hash (no rootHash) */
+    memcpy(c->catalogHash.data, p, PROLLY_HASH_SIZE); p += PROLLY_HASH_SIZE;
+    memset(c->rootHash.data, 0, PROLLY_HASH_SIZE); /* V2 has no rootHash */
+  }else{
+    return SQLITE_CORRUPT;
+  }
 
   /* timestamp */
   c->timestamp = DLC_GET_I64(p); p += 8;

@@ -826,7 +826,11 @@ static void doltliteMergeFunc(
       char msg[256];
 
       memset(&mergeCommit, 0, sizeof(mergeCommit));
-      memcpy(&mergeCommit.parentHash, &ourHead, sizeof(ProllyHash));
+      /* Merge commit has TWO parents: ours (first) and theirs (second) */
+      mergeCommit.aParents[0] = ourHead;
+      mergeCommit.aParents[1] = theirHead;
+      mergeCommit.nParents = 2;
+      mergeCommit.parentHash = ourHead;  /* convenience field */
       memcpy(&mergeCommit.catalogHash, &mergedCatHash, sizeof(ProllyHash));
       mergeCommit.timestamp = (i64)time(0);
       sqlite3_snprintf(sizeof(msg), msg, "Merge branch '%s'", zBranch);

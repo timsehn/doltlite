@@ -166,46 +166,91 @@ int doltliteFindAncestor(
     return SQLITE_OK;
   }
 
-  /* Step 1: Collect all ancestors of commit1 (including commit1 itself) */
+  /* BFS traversal for DAG (supports merge commits with multiple parents).
+  ** Step 1: Collect all ancestors of commit1 via BFS.
+  ** Step 2: BFS commit2's ancestors, checking against the set. */
   rc = hashSetInit(&ancestors, 64);
   if( rc!=SQLITE_OK ) return rc;
 
-  current = *commitHash1;
-  while( !prollyHashIsEmpty(&current) ){
-    rc = hashSetInsert(&ancestors, &current);
-    if( rc!=SQLITE_OK ){
-      hashSetFree(&ancestors);
-      return rc;
-    }
-    memset(&commit, 0, sizeof(commit));
-    rc = loadCommitByHash(db, &current, &commit);
-    if( rc!=SQLITE_OK ){
-      /* End of chain (initial commit or missing) */
-      break;
-    }
-    current = commit.parentHash;
-    doltliteCommitClear(&commit);
-  }
+  /* BFS queue: simple dynamic array of hashes */
+  {
+    ProllyHash *queue = 0;
+    int qHead = 0, qTail = 0, qAlloc = 0;
+    int i;
 
-  /* Step 2: Walk commit2's chain, checking against the set */
-  current = *commitHash2;
-  while( !prollyHashIsEmpty(&current) ){
-    if( hashSetContains(&ancestors, &current) ){
-      *pAncestor = current;
-      hashSetFree(&ancestors);
-      return SQLITE_OK;
+    /* Enqueue commit1 */
+    qAlloc = 64;
+    queue = sqlite3_malloc(qAlloc * (int)sizeof(ProllyHash));
+    if( !queue ){ hashSetFree(&ancestors); return SQLITE_NOMEM; }
+    queue[qTail++] = *commitHash1;
+
+    /* Step 1: BFS all ancestors of commit1 */
+    while( qHead < qTail ){
+      current = queue[qHead++];
+      if( prollyHashIsEmpty(&current) ) continue;
+      if( hashSetContains(&ancestors, &current) ) continue;
+      rc = hashSetInsert(&ancestors, &current);
+      if( rc!=SQLITE_OK ) goto anc_cleanup;
+      memset(&commit, 0, sizeof(commit));
+      rc = loadCommitByHash(db, &current, &commit);
+      if( rc!=SQLITE_OK ) continue; /* end of chain */
+      /* Enqueue ALL parents (supports merge commits) */
+      for(i=0; i<commit.nParents; i++){
+        if( qTail >= qAlloc ){
+          qAlloc *= 2;
+          ProllyHash *q2 = sqlite3_realloc(queue, qAlloc*(int)sizeof(ProllyHash));
+          if( !q2 ){ doltliteCommitClear(&commit); rc=SQLITE_NOMEM; goto anc_cleanup; }
+          queue = q2;
+        }
+        queue[qTail++] = commit.aParents[i];
+      }
+      doltliteCommitClear(&commit);
     }
-    memset(&commit, 0, sizeof(commit));
-    rc = loadCommitByHash(db, &current, &commit);
-    if( rc!=SQLITE_OK ){
-      break;
+
+    /* Step 2: BFS commit2's ancestors, checking against set */
+    qHead = 0; qTail = 0;
+    queue[qTail++] = *commitHash2;
+    {
+      HashSet visited;
+      rc = hashSetInit(&visited, 64);
+      if( rc!=SQLITE_OK ) goto anc_cleanup;
+
+      while( qHead < qTail ){
+        current = queue[qHead++];
+        if( prollyHashIsEmpty(&current) ) continue;
+        if( hashSetContains(&visited, &current) ) continue;
+        hashSetInsert(&visited, &current);
+        if( hashSetContains(&ancestors, &current) ){
+          *pAncestor = current;
+          hashSetFree(&visited);
+          sqlite3_free(queue);
+          hashSetFree(&ancestors);
+          return SQLITE_OK;
+        }
+        memset(&commit, 0, sizeof(commit));
+        rc = loadCommitByHash(db, &current, &commit);
+        if( rc!=SQLITE_OK ) continue;
+        for(i=0; i<commit.nParents; i++){
+          if( qTail >= qAlloc ){
+            qAlloc *= 2;
+            ProllyHash *q2 = sqlite3_realloc(queue, qAlloc*(int)sizeof(ProllyHash));
+            if( !q2 ){ doltliteCommitClear(&commit); hashSetFree(&visited); rc=SQLITE_NOMEM; goto anc_cleanup; }
+            queue = q2;
+          }
+          queue[qTail++] = commit.aParents[i];
+        }
+        doltliteCommitClear(&commit);
+      }
+      hashSetFree(&visited);
     }
-    current = commit.parentHash;
-    doltliteCommitClear(&commit);
+
+    rc = SQLITE_NOTFOUND;
+anc_cleanup:
+    sqlite3_free(queue);
   }
 
   hashSetFree(&ancestors);
-  return SQLITE_NOTFOUND;
+  return rc;
 }
 
 /* --------------------------------------------------------------------------
