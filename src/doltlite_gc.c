@@ -224,22 +224,16 @@ static int gcMarkReachable(
   rc = gcQueueInit(&queue);
   if( rc!=SQLITE_OK ) return rc;
 
-  /* Seed: all manifest roots */
+  /* Seed: manifest roots */
   gcQueuePush(&queue, &cs->root);
   gcQueuePush(&queue, &cs->catalog);
   gcQueuePush(&queue, &cs->headCommit);
-  gcQueuePush(&queue, &cs->stagedCatalog);
   gcQueuePush(&queue, &cs->refsHash);
 
-  /* Merge state */
-  if( cs->isMerging ){
-    gcQueuePush(&queue, &cs->mergeCommitHash);
-    gcQueuePush(&queue, &cs->conflictsCatalogHash);
-  }
-
-  /* All branch tips */
+  /* All branch tips + per-branch WorkingSet chunks */
   for(i=0; i<cs->nBranches; i++){
     gcQueuePush(&queue, &cs->aBranches[i].commitHash);
+    gcQueuePush(&queue, &cs->aBranches[i].workingSetHash);
   }
 
   /* All tag targets */
@@ -295,7 +289,23 @@ static int gcMarkReachable(
       /* Could be a catalog, refs, or conflict chunk.
       ** Catalogs contain table root hashes we need to follow.
       ** Format: version(1=0x02)+iNextTable(4)+nTables(4)+entries */
-      if( nData >= 9 && data[0] == 0x43 ){  /* CATALOG_FORMAT_V2 = 'C' */
+      /* WorkingSet chunk: version(1=0x01) + staged(20) + merging(1) +
+      ** mergeCommit(20) + conflicts(20) = 62 bytes.
+      ** Follow staged catalog and conflicts catalog hashes. */
+      if( nData == 62 && data[0] == 1 ){
+        ProllyHash stagedCat, conflictsCat;
+        memcpy(stagedCat.data, data + 1, PROLLY_HASH_SIZE);
+        memcpy(conflictsCat.data, data + 42, PROLLY_HASH_SIZE);
+        gcQueuePush(&queue, &stagedCat);
+        gcQueuePush(&queue, &conflictsCat);
+        if( data[21] ){  /* isMerging */
+          ProllyHash mergeCommit;
+          memcpy(mergeCommit.data, data + 22, PROLLY_HASH_SIZE);
+          gcQueuePush(&queue, &mergeCommit);
+        }
+      }
+      /* Catalog chunk: version(1='C') */
+      if( nData >= 9 && data[0] == 0x43 ){
         int nTables = (int)(data[5] | (data[6]<<8) |
                             (data[7]<<16) | (data[8]<<24));
         if( nTables >= 0 && nTables < 10000 ){
@@ -505,18 +515,16 @@ static int gcSweep(
       memcpy(m, cs->catalog.data, PROLLY_HASH_SIZE); m+=PROLLY_HASH_SIZE;
       /* head_commit */
       memcpy(m, cs->headCommit.data, PROLLY_HASH_SIZE); m+=PROLLY_HASH_SIZE;
-      /* staged_catalog */
-      memcpy(m, cs->stagedCatalog.data, PROLLY_HASH_SIZE); m+=PROLLY_HASH_SIZE;
+      /* staged_catalog (deprecated — zero-fill for format stability) */
+      memset(m, 0, PROLLY_HASH_SIZE); m+=PROLLY_HASH_SIZE;
       /* refs_hash */
       memcpy(m, cs->refsHash.data, PROLLY_HASH_SIZE); m+=PROLLY_HASH_SIZE;
-      /* is_merging */
-      { u32 im = (u32)cs->isMerging;
-        m[0]=(u8)im; m[1]=(u8)(im>>8); m[2]=(u8)(im>>16); m[3]=(u8)(im>>24); }
-      m+=4;
-      /* merge_commit_hash */
-      memcpy(m, cs->mergeCommitHash.data, PROLLY_HASH_SIZE); m+=PROLLY_HASH_SIZE;
-      /* conflicts_catalog_hash */
-      memcpy(m, cs->conflictsCatalogHash.data, PROLLY_HASH_SIZE);
+      /* is_merging (deprecated — zero-fill) */
+      memset(m, 0, 4); m+=4;
+      /* merge_commit_hash (deprecated — zero-fill) */
+      memset(m, 0, PROLLY_HASH_SIZE); m+=PROLLY_HASH_SIZE;
+      /* conflicts_catalog_hash (deprecated — zero-fill) */
+      memset(m, 0, PROLLY_HASH_SIZE);
 
       /* Write to temp file, then rename */
       if( cs->zFilename && strcmp(cs->zFilename, ":memory:")!=0 ){
