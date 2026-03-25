@@ -1,5 +1,6 @@
 /*
-** Prolly tree hashing: xxHash32 content addressing + rolling hash splitter.
+** Prolly tree hashing: SHA-512 based content addressing (first 20 bytes,
+** matching Dolt) + rolling hash splitter.
 ** Part of the Doltite prolly tree storage engine.
 */
 #ifndef SQLITE_PROLLY_HASH_H
@@ -24,9 +25,6 @@ int prollyHashCompare(const ProllyHash *a, const ProllyHash *b);
 
 /* Check if hash is all zeros */
 int prollyHashIsEmpty(const ProllyHash *h);
-
-/* xxHash32 for rolling hash and general hashing */
-u32 prollyXXHash32(const void *pData, int nData, u32 seed);
 
 /*
 ** Rolling hash splitter for chunk boundaries.
