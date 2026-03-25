@@ -540,8 +540,11 @@ static void initDefaultMeta(Btree *pBtree){
 
 /*
 ** Deserialize a V2 catalog chunk into the table registry.
-** V2 format: version(1=0x02) + iNextTable(4) + nTables(4) + entries.
+** V2 format: version(1='C') + iNextTable(4) + nTables(4) + entries.
 ** No aMeta — runtime meta is initialized from constants.
+** BTREE_SCHEMA_VERSION is derived from a hash of the catalog data so
+** that different catalogs produce different versions (needed for
+** multi-connection schema change detection).
 */
 static int deserializeCatalog(Btree *pBtree, const u8 *data, int nData){
   const u8 *q = data;
@@ -563,6 +566,18 @@ static int deserializeCatalog(Btree *pBtree, const u8 *data, int nData){
   nTables = (int)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
   q += 4;
   initDefaultMeta(pBtree);
+
+  /* Derive BTREE_SCHEMA_VERSION from catalog content so multiple
+  ** connections on the same database agree on the version number,
+  ** and schema changes are detected across connections. */
+  {
+    u32 h = 0;
+    int j;
+    for(j = 0; j < nData; j++){
+      h = h * 31 + data[j];
+    }
+    pBtree->aMeta[BTREE_SCHEMA_VERSION] = h | 1;  /* ensure non-zero */
+  }
 
   /* Table entries */
   for(i=0; i<nTables; i++){
