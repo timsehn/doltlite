@@ -566,7 +566,7 @@ static int serializeMergedCatalog(
   p = buf;
 
   /* V2 format: version byte + iNextTable + nTables (no aMeta) */
-  *p++ = 0x02;  /* CATALOG_FORMAT_V2 */
+  *p++ = 0x43;  /* CATALOG_FORMAT_V2 = 'C' */
   p[0] = (u8)iNextTable;
   p[1] = (u8)(iNextTable>>8);
   p[2] = (u8)(iNextTable>>16);

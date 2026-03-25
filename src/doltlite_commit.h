@@ -4,12 +4,7 @@
 ** A commit is a content-addressed snapshot of the database state.
 ** Commits form a DAG via parent hashes (merge commits have 2+ parents).
 **
-** V1 format (legacy, single parent):
-**   version(1=0x01) + parent_hash(20) + root_hash(20) + catalog_hash(20) +
-**   timestamp(8) + name_len(2) + name(...) + email_len(2) + email(...) +
-**   message_len(2) + message(...)
-**
-** V2 format (multi-parent, no redundant rootHash):
+** Serialized format:
 **   version(1=0x02) + nParents(1) + parent_hashes(20*nParents) +
 **   catalog_hash(20) + timestamp(8) + name_len(2) + name(...) +
 **   email_len(2) + email(...) + message_len(2) + message(...)
@@ -20,7 +15,6 @@
 #include "sqliteInt.h"
 #include "prolly_hash.h"
 
-#define DOLTLITE_COMMIT_V1 1
 #define DOLTLITE_COMMIT_V2 2
 #define DOLTLITE_COMMIT_VERSION DOLTLITE_COMMIT_V2
 

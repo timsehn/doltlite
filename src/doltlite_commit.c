@@ -80,21 +80,9 @@ int doltliteCommitDeserialize(const u8 *data, int nData, DoltliteCommit *c){
   if( nData < 1 ) return SQLITE_CORRUPT;
 
   version = *p++;
+  if( version != DOLTLITE_COMMIT_V2 ) return SQLITE_CORRUPT;
 
-  if( version == DOLTLITE_COMMIT_V1 ){
-    /* V1: parent(20) + root(20) + catalog(20) + ts(8) + strings */
-    if( nData < 1+20+20+20+8+2+2+2 ) return SQLITE_CORRUPT;
-    memcpy(c->parentHash.data, p, PROLLY_HASH_SIZE); p += PROLLY_HASH_SIZE;
-    memcpy(c->rootHash.data, p, PROLLY_HASH_SIZE); p += PROLLY_HASH_SIZE;
-    memcpy(c->catalogHash.data, p, PROLLY_HASH_SIZE); p += PROLLY_HASH_SIZE;
-    /* Populate aParents from V1 single parent */
-    if( !prollyHashIsEmpty(&c->parentHash) ){
-      c->aParents[0] = c->parentHash;
-      c->nParents = 1;
-    }else{
-      c->nParents = 0;
-    }
-  }else if( version == DOLTLITE_COMMIT_V2 ){
+  {
     /* V2: nParents(1) + parents(20*N) + catalog(20) + ts(8) + strings */
     int nPar;
     if( nData < 3 ) return SQLITE_CORRUPT;
@@ -112,9 +100,7 @@ int doltliteCommitDeserialize(const u8 *data, int nData, DoltliteCommit *c){
     if( nPar > 0 ) c->parentHash = c->aParents[0];
     /* catalog hash (no rootHash) */
     memcpy(c->catalogHash.data, p, PROLLY_HASH_SIZE); p += PROLLY_HASH_SIZE;
-    memset(c->rootHash.data, 0, PROLLY_HASH_SIZE); /* V2 has no rootHash */
-  }else{
-    return SQLITE_CORRUPT;
+    memset(c->rootHash.data, 0, PROLLY_HASH_SIZE);
   }
 
   /* timestamp */
