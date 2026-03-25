@@ -72,6 +72,7 @@ extern const char *doltliteGetSessionBranch(sqlite3 *db);
 extern void doltliteSetSessionBranch(sqlite3 *db, const char *zBranch);
 extern void doltliteGetSessionHead(sqlite3 *db, ProllyHash *pHead);
 extern void doltliteSetSessionHead(sqlite3 *db, const ProllyHash *pHead);
+extern void doltliteGetSessionStaged(sqlite3 *db, ProllyHash *pStaged);
 extern void doltliteSetSessionStaged(sqlite3 *db, const ProllyHash *pStaged);
 
 /* --------------------------------------------------------------------------
@@ -204,28 +205,36 @@ static void doltCheckoutFunc(sqlite3_context *ctx, int argc, sqlite3_value **arg
     memcpy(&catHash, &commit.catalogHash, sizeof(ProllyHash));
     doltliteCommitClear(&commit);
 
+    /* Save current branch's WorkingSet BEFORE hard reset overwrites session */
+    {
+      extern int doltliteSaveWorkingSet(sqlite3*);
+      doltliteSaveWorkingSet(db);
+    }
+
     rc = doltliteHardReset(db, &catHash);
     if( rc!=SQLITE_OK ){
       sqlite3_result_error(ctx, "checkout failed", -1);
       return;
     }
 
-    /* Save current branch's WorkingSet before switching */
-    {
-      extern int doltliteSaveWorkingSet(sqlite3*);
-      extern int doltliteLoadWorkingSet(sqlite3*, const char*);
-      doltliteSaveWorkingSet(db);
-    }
-
     /* Update this session's branch state */
     doltliteSetSessionBranch(db, zBranch);
     doltliteSetSessionHead(db, &targetCommit);
-    doltliteSetSessionStaged(db, &catHash);
 
-    /* Load the target branch's WorkingSet (staged + merge state) */
+    /* Load the target branch's WorkingSet (staged + merge state).
+    ** If the target branch has no saved WorkingSet, defaults to
+    ** staged = empty (which means "same as HEAD" = clean). */
     {
       extern int doltliteLoadWorkingSet(sqlite3*, const char*);
       doltliteLoadWorkingSet(db, zBranch);
+      /* If no WorkingSet was loaded (staged is empty), set staged = HEAD catalog */
+      {
+        ProllyHash staged;
+        doltliteGetSessionStaged(db, &staged);
+        if( prollyHashIsEmpty(&staged) ){
+          doltliteSetSessionStaged(db, &catHash);
+        }
+      }
     }
 
     /* Update the default branch in the store (for next open) */

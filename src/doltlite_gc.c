@@ -289,7 +289,23 @@ static int gcMarkReachable(
       /* Could be a catalog, refs, or conflict chunk.
       ** Catalogs contain table root hashes we need to follow.
       ** Format: version(1=0x02)+iNextTable(4)+nTables(4)+entries */
-      if( nData >= 9 && data[0] == 0x43 ){  /* CATALOG_FORMAT_V2 = 'C' */
+      /* WorkingSet chunk: version(1=0x01) + staged(20) + merging(1) +
+      ** mergeCommit(20) + conflicts(20) = 62 bytes.
+      ** Follow staged catalog and conflicts catalog hashes. */
+      if( nData == 62 && data[0] == 1 ){
+        ProllyHash stagedCat, conflictsCat;
+        memcpy(stagedCat.data, data + 1, PROLLY_HASH_SIZE);
+        memcpy(conflictsCat.data, data + 42, PROLLY_HASH_SIZE);
+        gcQueuePush(&queue, &stagedCat);
+        gcQueuePush(&queue, &conflictsCat);
+        if( data[21] ){  /* isMerging */
+          ProllyHash mergeCommit;
+          memcpy(mergeCommit.data, data + 22, PROLLY_HASH_SIZE);
+          gcQueuePush(&queue, &mergeCommit);
+        }
+      }
+      /* Catalog chunk: version(1='C') */
+      if( nData >= 9 && data[0] == 0x43 ){
         int nTables = (int)(data[5] | (data[6]<<8) |
                             (data[7]<<16) | (data[8]<<24));
         if( nTables >= 0 && nTables < 10000 ){

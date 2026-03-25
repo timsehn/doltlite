@@ -42,6 +42,7 @@ TESTS=(
   doltlite_unicode_blob.sh
   doltlite_edge_cases.sh
   doltlite_advanced.sh
+  doltlite_working_set.sh
   doltlite_feature_deep.sh
   doltlite_deep_history.sh
   doltlite_perf.sh
