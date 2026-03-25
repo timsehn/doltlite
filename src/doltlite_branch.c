@@ -42,58 +42,29 @@ extern int doltliteLoadCatalog(sqlite3 *db, const ProllyHash *catHash,
 static int checkWorkingDirty(sqlite3 *db){
   ChunkStore *cs = doltliteGetChunkStore(db);
   ProllyHash headCatHash, workingCatHash;
-  struct TableEntry *aHead = 0, *aWorking = 0;
-  int nHead = 0, nWorking = 0, rc, i, dirty = 0;
+  int rc;
 
   if( !cs ) return -1;
 
-  /* Get HEAD catalog */
+  /* Get HEAD catalog hash */
   rc = doltliteGetHeadCatalogHash(db, &headCatHash);
   if( rc!=SQLITE_OK ) return -1;
-  if( prollyHashIsEmpty(&headCatHash) ) return 0;  /* no HEAD = nothing to compare */
-  rc = doltliteLoadCatalog(db, &headCatHash, &aHead, &nHead, 0);
-  if( rc!=SQLITE_OK ) return -1;
+  if( prollyHashIsEmpty(&headCatHash) ) return 0;
 
-  /* Get working catalog */
+  /* Get working catalog hash — serialize current state to a chunk.
+  ** With V2 catalog format, the hash is purely data-derived (no aMeta),
+  ** so this comparison is reliable: equal hashes ↔ identical data. */
   {
     u8 *catData = 0; int nCatData = 0;
     rc = doltliteFlushAndSerializeCatalog(db, &catData, &nCatData);
-    if( rc!=SQLITE_OK ){ sqlite3_free(aHead); return -1; }
+    if( rc!=SQLITE_OK ) return -1;
     rc = chunkStorePut(cs, catData, nCatData, &workingCatHash);
     sqlite3_free(catData);
-    if( rc!=SQLITE_OK ){ sqlite3_free(aHead); return -1; }
-    rc = doltliteLoadCatalog(db, &workingCatHash, &aWorking, &nWorking, 0);
-    if( rc!=SQLITE_OK ){ sqlite3_free(aHead); return -1; }
+    if( rc!=SQLITE_OK ) return -1;
   }
 
-  /* Compare: check for new/modified tables in working */
-  for(i=0; i<nWorking && !dirty; i++){
-    int j, found = 0;
-    if( aWorking[i].iTable<=1 ) continue;
-    for(j=0; j<nHead; j++){
-      if( aHead[j].iTable==aWorking[i].iTable ){ found = 1;
-        if( prollyHashCompare(&aHead[j].root, &aWorking[i].root)!=0 ) dirty = 1;
-        if( !prollyHashIsEmpty(&aHead[j].schemaHash)
-         && !prollyHashIsEmpty(&aWorking[i].schemaHash)
-         && prollyHashCompare(&aHead[j].schemaHash, &aWorking[i].schemaHash)!=0 ) dirty = 1;
-        break;
-      }
-    }
-    if( !found ) dirty = 1;  /* new table */
-  }
-  /* Check for deleted tables */
-  for(i=0; i<nHead && !dirty; i++){
-    int j, found = 0;
-    if( aHead[i].iTable<=1 ) continue;
-    for(j=0; j<nWorking; j++){
-      if( aWorking[j].iTable==aHead[i].iTable ){ found = 1; break; }
-    }
-    if( !found ) dirty = 1;
-  }
-
-  sqlite3_free(aHead);
-  sqlite3_free(aWorking);
-  return dirty;
+  /* O(1) dirty check: compare catalog hashes */
+  return prollyHashCompare(&headCatHash, &workingCatHash) != 0;
 }
 
 /* Per-session branch state (in Btree struct) */

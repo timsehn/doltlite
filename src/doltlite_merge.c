@@ -543,14 +543,14 @@ static struct TableEntry *findTableByName(
 */
 static int serializeMergedCatalog(
   sqlite3 *db,
-  const ProllyHash *oursCatHash,     /* For copying meta header */
+  const ProllyHash *oursCatHash,     /* unused (V2 has no meta to copy) */
   struct TableEntry *aMerged,
   int nMerged,
   Pgno iNextTable,
   ProllyHash *pOutHash               /* OUT: hash of stored catalog chunk */
 ){
   ChunkStore *cs = doltliteGetChunkStore(db);
-  int sz = 4 + 4 + 64;
+  int sz = 1 + 4 + 4;  /* V2: version(1) + iNextTable(4) + nTables(4) */
   { int j; for(j=0;j<nMerged;j++){
     int nl = aMerged[j].zName ? (int)strlen(aMerged[j].zName) : 0;
     sz += 4+1+PROLLY_HASH_SIZE+PROLLY_HASH_SIZE+2+nl;
@@ -559,36 +559,24 @@ static int serializeMergedCatalog(
   u8 *p;
   int rc;
 
+  (void)oursCatHash;  /* V2 catalogs have no meta to copy */
+
   buf = sqlite3_malloc(sz);
   if( !buf ) return SQLITE_NOMEM;
   p = buf;
 
-  /* Copy iNextTable and meta from ours catalog */
-  {
-    u8 *oursData = 0;
-    int nOursData = 0;
-    rc = chunkStoreGet(cs, oursCatHash, &oursData, &nOursData);
-    if( rc==SQLITE_OK && nOursData>=72 ){
-      memcpy(p, oursData, 72); /* iNextTable(4) + nTables(4) + meta(64) */
-    }else{
-      memset(p, 0, 72);
-    }
-    sqlite3_free(oursData);
-  }
-
-  /* Override iNextTable */
+  /* V2 format: version byte + iNextTable + nTables (no aMeta) */
+  *p++ = 0x02;  /* CATALOG_FORMAT_V2 */
   p[0] = (u8)iNextTable;
   p[1] = (u8)(iNextTable>>8);
   p[2] = (u8)(iNextTable>>16);
   p[3] = (u8)(iNextTable>>24);
-
-  /* Override nTables */
-  p[4] = (u8)nMerged;
-  p[5] = (u8)(nMerged>>8);
-  p[6] = (u8)(nMerged>>16);
-  p[7] = (u8)(nMerged>>24);
-
-  p += 72;
+  p += 4;
+  p[0] = (u8)nMerged;
+  p[1] = (u8)(nMerged>>8);
+  p[2] = (u8)(nMerged>>16);
+  p[3] = (u8)(nMerged>>24);
+  p += 4;
 
   /* Write table entries: iTable(4) + flags(1) + root(20) + schemaHash(20) + name_len(2) + name(var) */
   {

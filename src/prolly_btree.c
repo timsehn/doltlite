@@ -442,9 +442,30 @@ static void refreshCursorRoot(BtCursor *pCur){
 ** Format: [iNextTable:4][nTables:4][meta[0..15]: 64 bytes]
 **         per table: [iTable:4][flags:1][root:20]
 */
+/*
+** Serialize the catalog (table registry) to a content-addressed chunk.
+**
+** Following Dolt's RootValue model, the catalog is purely data-derived:
+** table entries with their root hashes, schema hashes, names, and flags.
+** aMeta[0..15] (SQLite runtime state) is NOT included — it is reconstructed
+** from constants on catalog load. This ensures the catalog hash changes ONLY
+** when actual table data or schema changes, enabling O(1) dirty checks.
+**
+** Format V2 (clean catalog):
+**   version(1) = 0x02
+**   iNextTable(4)
+**   nTables(4)
+**   table_entries[]:
+**     iTable(4) + flags(1) + root(20) + schemaHash(20) + name_len(2) + name(var)
+**
+** V1 (legacy, with meta): no version byte, starts with iNextTable directly,
+** includes aMeta[16] between header and table entries.
+*/
+#define CATALOG_FORMAT_V2 0x02
+
 static int serializeCatalog(Btree *pBtree, u8 **ppOut, int *pnOut){
   int nTables = pBtree->nTables;
-  int sz = 4 + 4 + 64;  /* header */
+  int sz = 1 + 4 + 4;  /* version(1) + iNextTable(4) + nTables(4) */
   u8 *buf, *q;
   int i;
 
@@ -471,6 +492,8 @@ static int serializeCatalog(Btree *pBtree, u8 **ppOut, int *pnOut){
   buf = sqlite3_malloc(sz);
   if( !buf ) return SQLITE_NOMEM;
   q = buf;
+  /* Version tag — distinguishes V2 (no meta) from V1 (has meta) */
+  *q++ = CATALOG_FORMAT_V2;
   /* iNextTable */
   q[0]=(u8)(pBtree->iNextTable); q[1]=(u8)(pBtree->iNextTable>>8);
   q[2]=(u8)(pBtree->iNextTable>>16); q[3]=(u8)(pBtree->iNextTable>>24);
@@ -479,13 +502,7 @@ static int serializeCatalog(Btree *pBtree, u8 **ppOut, int *pnOut){
   q[0]=(u8)nTables; q[1]=(u8)(nTables>>8);
   q[2]=(u8)(nTables>>16); q[3]=(u8)(nTables>>24);
   q += 4;
-  /* meta values */
-  for(i=0; i<16; i++){
-    u32 v = pBtree->aMeta[i];
-    q[0]=(u8)v; q[1]=(u8)(v>>8); q[2]=(u8)(v>>16); q[3]=(u8)(v>>24);
-    q += 4;
-  }
-  /* table entries: iTable(4) + flags(1) + root(20) + schemaHash(20) + name_len(2) + name(var) */
+  /* Table entries only — no aMeta. Hash covers purely data content. */
   for(i=0; i<nTables; i++){
     struct TableEntry *t = &pBtree->aTables[i];
     u32 pg = t->iTable;
@@ -507,28 +524,95 @@ static int serializeCatalog(Btree *pBtree, u8 **ppOut, int *pnOut){
 }
 
 /*
-** Deserialize catalog chunk into the table registry + meta values.
+** Initialize aMeta with default constant values.
+** Called after deserializing a V2 catalog (which has no meta) or
+** during a fresh database open.
+*/
+static void initDefaultMeta(Btree *pBtree){
+  memset(pBtree->aMeta, 0, sizeof(pBtree->aMeta));
+  pBtree->aMeta[BTREE_FILE_FORMAT] = 4;
+  pBtree->aMeta[BTREE_TEXT_ENCODING] = SQLITE_UTF8;
+  /* BTREE_SCHEMA_VERSION starts at 0, bumped by doltliteHardReset.
+  ** BTREE_LARGEST_ROOT_PAGE is set after table entries are loaded. */
+}
+
+/*
+** Deserialize catalog chunk into the table registry.
+**
+** Supports two formats:
+**   V1 (legacy): starts with iNextTable(4), includes aMeta[16] after header
+**   V2 (clean):  starts with version byte 0x02, no aMeta
+**
+** V1 detection: if first byte could be a small iNextTable value (not 0x02),
+** it's V1. In practice, iNextTable starts at 2 and grows, so the first byte
+** is typically 0x02+ for small tables. We disambiguate by checking if the
+** byte is exactly CATALOG_FORMAT_V2 AND the data is too small for V1.
+** More robust: V1 minimum is 72 bytes (4+4+64); V2 minimum is 9 bytes (1+4+4).
+** If data[0]==CATALOG_FORMAT_V2 and nData < 72, it must be V2.
+** If data[0]==CATALOG_FORMAT_V2 and nData >= 72, check if interpreting as V1
+** gives a plausible iNextTable (data[0..3]).
 */
 static int deserializeCatalog(Btree *pBtree, const u8 *data, int nData){
   const u8 *q = data;
   int nTables, i;
-  if( nData < 72 ) return SQLITE_CORRUPT; /* minimum: 4+4+64 */
-  /* iNextTable */
-  pBtree->iNextTable = (Pgno)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
-  q += 4;
-  /* nTables */
-  nTables = (int)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
-  q += 4;
-  /* meta values */
-  for(i=0; i<16; i++){
-    pBtree->aMeta[i] = (u32)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
-    q += 4;
+  int isV2 = 0;
+
+  if( nData < 9 ) return SQLITE_CORRUPT;
+
+  /* Detect format version.
+  ** V2 starts with 0x02 version byte. V1 starts with iNextTable as u32-LE.
+  ** Since iNextTable is always >= 2, the first byte of V1 is also >= 2.
+  ** Disambiguate: V1 has aMeta[16] (64 bytes) after the 8-byte header,
+  ** so V1 minimum is 72 bytes. If first byte is 0x02 AND we check the
+  ** would-be V1 nTables field — if it's implausibly large, it's V2. */
+  if( data[0] == CATALOG_FORMAT_V2 ){
+    /* Could be V2 or V1 with iNextTable=0x????02.
+    ** In V1, bytes 4..7 = nTables. If this is V2, bytes 1..4 = iNextTable
+    ** and bytes 5..8 = nTables. Check: does V1 interpretation give
+    ** a nTables that makes sense with remaining data? */
+    u32 v1NextTable = (u32)(data[0] | (data[1]<<8) | (data[2]<<16) | (data[3]<<24));
+    u32 v1nTables = (u32)(data[4] | (data[5]<<8) | (data[6]<<16) | (data[7]<<24));
+    /* V1 requires 72 + v1nTables*(4+1+20+20+2) = 72 + 47*nTables minimum */
+    if( nData < 72 || (int)(72 + v1nTables * 47) > nData + 1024 ){
+      /* V1 interpretation doesn't fit — it's V2 */
+      isV2 = 1;
+    }else if( v1NextTable > 100000 ){
+      /* Implausible iNextTable for V1 — treat as V2 */
+      isV2 = 1;
+    }
+    /* Otherwise it's a genuine V1 catalog with iNextTable ending in 0x02 */
   }
-  /* table entries */
+
+  /* Clear table registry */
   sqlite3_free(pBtree->aTables);
   pBtree->aTables = 0;
   pBtree->nTables = 0;
   pBtree->nTablesAlloc = 0;
+
+  if( isV2 ){
+    /* V2 format: version(1) + iNextTable(4) + nTables(4) + entries */
+    q++;  /* skip version byte */
+    pBtree->iNextTable = (Pgno)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
+    q += 4;
+    nTables = (int)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
+    q += 4;
+    /* No aMeta — initialize from constants */
+    initDefaultMeta(pBtree);
+  }else{
+    /* V1 format: iNextTable(4) + nTables(4) + meta[16](64) + entries */
+    if( nData < 72 ) return SQLITE_CORRUPT;
+    pBtree->iNextTable = (Pgno)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
+    q += 4;
+    nTables = (int)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
+    q += 4;
+    /* Read legacy meta values */
+    for(i=0; i<16; i++){
+      pBtree->aMeta[i] = (u32)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
+      q += 4;
+    }
+  }
+
+  /* Table entries (same format for V1 and V2) */
   for(i=0; i<nTables; i++){
     Pgno iTable;
     u8 flags;
@@ -560,6 +644,18 @@ static int deserializeCatalog(Btree *pBtree, const u8 *data, int nData){
       }
     }
   }
+
+  /* Derive LARGEST_ROOT_PAGE from loaded tables */
+  {
+    Pgno maxPage = 0;
+    for(i=0; i<pBtree->nTables; i++){
+      if( pBtree->aTables[i].iTable > maxPage ){
+        maxPage = pBtree->aTables[i].iTable;
+      }
+    }
+    pBtree->aMeta[BTREE_LARGEST_ROOT_PAGE] = maxPage;
+  }
+
   return SQLITE_OK;
 }
 
