@@ -196,18 +196,20 @@ static void doltliteAddFunc(
         }
       }
 
-      /* Re-serialize the modified staged catalog */
+      /* Re-serialize the modified staged catalog (V2 format) */
       {
-        /* Build a minimal catalog blob: iNextTable + nTables + meta[16] + entries */
-        /* We need iNextTable and meta from working. Load them. */
         Pgno iNextTable = 2;
-        u32 aMeta[16];
-        memset(aMeta, 0, sizeof(aMeta));
-
-        /* Get meta from working state (it's the current BtShared meta) */
-        /* For simplicity, re-serialize from the staged entries with working's meta */
+        /* Get iNextTable from working catalog */
         {
-          int sz = 4 + 4 + 64;
+          u8 *wData = 0; int wn = 0;
+          rc = chunkStoreGet(cs, &workingHash, &wData, &wn);
+          if( rc==SQLITE_OK && wn>=5 && wData[0]==0x43 ){
+            iNextTable = (Pgno)(wData[1]|(wData[2]<<8)|(wData[3]<<16)|(wData[4]<<24));
+          }
+          sqlite3_free(wData);
+        }
+        {
+          int sz = 1 + 4 + 4;  /* V2: version + iNextTable + nTables */
           u8 *buf, *p;
           ProllyHash newStagedHash;
           int j;
@@ -224,19 +226,13 @@ static void doltliteAddFunc(
             return;
           }
           p = buf;
-          {
-            u8 *wData = 0; int wn = 0;
-            rc = chunkStoreGet(cs, &workingHash, &wData, &wn);
-            if( rc==SQLITE_OK && wn>=72 ){
-              memcpy(p, wData, 72);
-            }else{
-              memset(p, 0, 72);
-            }
-            sqlite3_free(wData);
-          }
-          p[4]=(u8)nStaged; p[5]=(u8)(nStaged>>8);
-          p[6]=(u8)(nStaged>>16); p[7]=(u8)(nStaged>>24);
-          p += 72;
+          *p++ = 0x43;  /* CATALOG_FORMAT_V2 = 'C' */
+          p[0]=(u8)iNextTable; p[1]=(u8)(iNextTable>>8);
+          p[2]=(u8)(iNextTable>>16); p[3]=(u8)(iNextTable>>24);
+          p += 4;
+          p[0]=(u8)nStaged; p[1]=(u8)(nStaged>>8);
+          p[2]=(u8)(nStaged>>16); p[3]=(u8)(nStaged>>24);
+          p += 4;
 
           for(i=0; i<nStaged; i++){
             Pgno pg = aStaged[i].iTable;
@@ -826,7 +822,11 @@ static void doltliteMergeFunc(
       char msg[256];
 
       memset(&mergeCommit, 0, sizeof(mergeCommit));
-      memcpy(&mergeCommit.parentHash, &ourHead, sizeof(ProllyHash));
+      /* Merge commit has TWO parents: ours (first) and theirs (second) */
+      mergeCommit.aParents[0] = ourHead;
+      mergeCommit.aParents[1] = theirHead;
+      mergeCommit.nParents = 2;
+      mergeCommit.parentHash = ourHead;  /* convenience field */
       memcpy(&mergeCommit.catalogHash, &mergedCatHash, sizeof(ProllyHash));
       mergeCommit.timestamp = (i64)time(0);
       sqlite3_snprintf(sizeof(msg), msg, "Merge branch '%s'", zBranch);

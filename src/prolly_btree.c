@@ -442,9 +442,32 @@ static void refreshCursorRoot(BtCursor *pCur){
 ** Format: [iNextTable:4][nTables:4][meta[0..15]: 64 bytes]
 **         per table: [iTable:4][flags:1][root:20]
 */
+/*
+** Serialize the catalog (table registry) to a content-addressed chunk.
+**
+** Following Dolt's RootValue model, the catalog is purely data-derived:
+** table entries with their root hashes, schema hashes, names, and flags.
+** aMeta[0..15] (SQLite runtime state) is NOT included — it is reconstructed
+** from constants on catalog load. This ensures the catalog hash changes ONLY
+** when actual table data or schema changes, enabling O(1) dirty checks.
+**
+** Format V2 (clean catalog):
+**   version(1) = 0x02
+**   iNextTable(4)
+**   nTables(4)
+**   table_entries[]:
+**     iTable(4) + flags(1) + root(20) + schemaHash(20) + name_len(2) + name(var)
+**
+** Format:
+**   version(1=0x02) + iNextTable(4) + nTables(4) + table_entries[...]
+*/
+/* Catalog version tag — must NOT collide with DOLTLITE_COMMIT_V2 (0x02)
+** or PROLLY_NODE_MAGIC first byte. Using 0x43 = 'C' for Catalog. */
+#define CATALOG_FORMAT_V2 0x43
+
 static int serializeCatalog(Btree *pBtree, u8 **ppOut, int *pnOut){
   int nTables = pBtree->nTables;
-  int sz = 4 + 4 + 64;  /* header */
+  int sz = 1 + 4 + 4;  /* version(1) + iNextTable(4) + nTables(4) */
   u8 *buf, *q;
   int i;
 
@@ -471,6 +494,8 @@ static int serializeCatalog(Btree *pBtree, u8 **ppOut, int *pnOut){
   buf = sqlite3_malloc(sz);
   if( !buf ) return SQLITE_NOMEM;
   q = buf;
+  /* Version tag — distinguishes V2 (no meta) from V1 (has meta) */
+  *q++ = CATALOG_FORMAT_V2;
   /* iNextTable */
   q[0]=(u8)(pBtree->iNextTable); q[1]=(u8)(pBtree->iNextTable>>8);
   q[2]=(u8)(pBtree->iNextTable>>16); q[3]=(u8)(pBtree->iNextTable>>24);
@@ -479,13 +504,7 @@ static int serializeCatalog(Btree *pBtree, u8 **ppOut, int *pnOut){
   q[0]=(u8)nTables; q[1]=(u8)(nTables>>8);
   q[2]=(u8)(nTables>>16); q[3]=(u8)(nTables>>24);
   q += 4;
-  /* meta values */
-  for(i=0; i<16; i++){
-    u32 v = pBtree->aMeta[i];
-    q[0]=(u8)v; q[1]=(u8)(v>>8); q[2]=(u8)(v>>16); q[3]=(u8)(v>>24);
-    q += 4;
-  }
-  /* table entries: iTable(4) + flags(1) + root(20) + schemaHash(20) + name_len(2) + name(var) */
+  /* Table entries only — no aMeta. Hash covers purely data content. */
   for(i=0; i<nTables; i++){
     struct TableEntry *t = &pBtree->aTables[i];
     u32 pg = t->iTable;
@@ -507,28 +526,60 @@ static int serializeCatalog(Btree *pBtree, u8 **ppOut, int *pnOut){
 }
 
 /*
-** Deserialize catalog chunk into the table registry + meta values.
+** Initialize aMeta with default constant values.
+** Called after deserializing a V2 catalog (which has no meta) or
+** during a fresh database open.
+*/
+static void initDefaultMeta(Btree *pBtree){
+  memset(pBtree->aMeta, 0, sizeof(pBtree->aMeta));
+  pBtree->aMeta[BTREE_FILE_FORMAT] = 4;
+  pBtree->aMeta[BTREE_TEXT_ENCODING] = SQLITE_UTF8;
+  /* BTREE_SCHEMA_VERSION starts at 0, bumped by doltliteHardReset.
+  ** BTREE_LARGEST_ROOT_PAGE is set after table entries are loaded. */
+}
+
+/*
+** Deserialize a V2 catalog chunk into the table registry.
+** V2 format: version(1='C') + iNextTable(4) + nTables(4) + entries.
+** No aMeta — runtime meta is initialized from constants.
+** BTREE_SCHEMA_VERSION is derived from a hash of the catalog data so
+** that different catalogs produce different versions (needed for
+** multi-connection schema change detection).
 */
 static int deserializeCatalog(Btree *pBtree, const u8 *data, int nData){
   const u8 *q = data;
   int nTables, i;
-  if( nData < 72 ) return SQLITE_CORRUPT; /* minimum: 4+4+64 */
-  /* iNextTable */
-  pBtree->iNextTable = (Pgno)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
-  q += 4;
-  /* nTables */
-  nTables = (int)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
-  q += 4;
-  /* meta values */
-  for(i=0; i<16; i++){
-    pBtree->aMeta[i] = (u32)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
-    q += 4;
-  }
-  /* table entries */
+
+  if( nData < 9 ) return SQLITE_CORRUPT;
+  if( data[0] != CATALOG_FORMAT_V2 ) return SQLITE_CORRUPT;
+
+  /* Clear table registry */
   sqlite3_free(pBtree->aTables);
   pBtree->aTables = 0;
   pBtree->nTables = 0;
   pBtree->nTablesAlloc = 0;
+
+  /* V2 format: version(1) + iNextTable(4) + nTables(4) + entries */
+  q++;  /* skip version byte */
+  pBtree->iNextTable = (Pgno)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
+  q += 4;
+  nTables = (int)(q[0] | (q[1]<<8) | (q[2]<<16) | (q[3]<<24));
+  q += 4;
+  initDefaultMeta(pBtree);
+
+  /* Derive BTREE_SCHEMA_VERSION from catalog content so multiple
+  ** connections on the same database agree on the version number,
+  ** and schema changes are detected across connections. */
+  {
+    u32 h = 0;
+    int j;
+    for(j = 0; j < nData; j++){
+      h = h * 31 + data[j];
+    }
+    pBtree->aMeta[BTREE_SCHEMA_VERSION] = h | 1;  /* ensure non-zero */
+  }
+
+  /* Table entries */
   for(i=0; i<nTables; i++){
     Pgno iTable;
     u8 flags;
@@ -560,6 +611,18 @@ static int deserializeCatalog(Btree *pBtree, const u8 *data, int nData){
       }
     }
   }
+
+  /* Derive LARGEST_ROOT_PAGE from loaded tables */
+  {
+    Pgno maxPage = 0;
+    for(i=0; i<pBtree->nTables; i++){
+      if( pBtree->aTables[i].iTable > maxPage ){
+        maxPage = pBtree->aTables[i].iTable;
+      }
+    }
+    pBtree->aMeta[BTREE_LARGEST_ROOT_PAGE] = maxPage;
+  }
+
   return SQLITE_OK;
 }
 

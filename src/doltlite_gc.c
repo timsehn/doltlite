@@ -188,10 +188,10 @@ static int gcQueuePop(GcQueue *q, ProllyHash *h){
 #define PROLLY_NODE_MAGIC_VAL 0x504E4F44
 
 static int isCommitChunk(const u8 *data, int nData){
-  /* Commits start with version byte = DOLTLITE_COMMIT_VERSION (1),
-  ** followed by 20-byte parent hash. Minimum size ~63 bytes. */
-  if( nData < 63 ) return 0;
-  if( data[0] != DOLTLITE_COMMIT_VERSION ) return 0;
+  /* Commits start with version byte (V2=2).
+  ** V2: version(1) + nParents(1) + parents(20*N) + catalog(20) + ... min ~30 bytes */
+  if( nData < 30 ) return 0;
+  if( data[0] != DOLTLITE_COMMIT_V2 ) return 0;
   /* Verify it's NOT a prolly node (magic would be at offset 0) */
   if( nData >= 4 ){
     u32 m = (u32)data[0] | ((u32)data[1]<<8) |
@@ -276,28 +276,31 @@ static int gcMarkReachable(
         }
       }
     }else if( isCommitChunk(data, nData) ){
-      /* Commit — follow parent, root, catalog */
+      /* Commit — follow ALL parents + catalog (+ rootHash for V1) */
       DoltliteCommit commit;
       memset(&commit, 0, sizeof(commit));
       int drc = doltliteCommitDeserialize(data, nData, &commit);
       if( drc==SQLITE_OK ){
-        gcQueuePush(&queue, &commit.parentHash);
-        gcQueuePush(&queue, &commit.rootHash);
+        int pi;
+        for(pi=0; pi<commit.nParents; pi++){
+          gcQueuePush(&queue, &commit.aParents[pi]);
+        }
+        if( !prollyHashIsEmpty(&commit.rootHash) ){
+          gcQueuePush(&queue, &commit.rootHash);  /* V1 compat */
+        }
         gcQueuePush(&queue, &commit.catalogHash);
         doltliteCommitClear(&commit);
       }
     }else{
       /* Could be a catalog, refs, or conflict chunk.
       ** Catalogs contain table root hashes we need to follow.
-      ** Try parsing as catalog: header is iNextTable(4)+nTables(4)+meta(64). */
-      if( nData >= 72 ){
-        int nTables = (int)(data[4] | (data[5]<<8) |
-                            (data[6]<<16) | (data[7]<<24));
-        /* Sanity check: nTables should be reasonable */
+      ** Format: version(1=0x02)+iNextTable(4)+nTables(4)+entries */
+      if( nData >= 9 && data[0] == 0x43 ){  /* CATALOG_FORMAT_V2 = 'C' */
+        int nTables = (int)(data[5] | (data[6]<<8) |
+                            (data[7]<<16) | (data[8]<<24));
         if( nTables >= 0 && nTables < 10000 ){
-          const u8 *p = data + 72;
+          const u8 *p = data + 9;
           for(i=0; i<nTables; i++){
-            /* Each entry: iTable(4) + flags(1) + root(20) + schemaHash(20) + name_len(2) + name(var) */
             if( p + 4 + 1 + PROLLY_HASH_SIZE + PROLLY_HASH_SIZE + 2 > data + nData ) break;
             {
               ProllyHash tableRoot;
