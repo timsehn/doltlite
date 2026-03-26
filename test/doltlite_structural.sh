@@ -284,11 +284,12 @@ SIZE_AFTER_10=$(file_size "$DB")
 GROWTH=$((SIZE_AFTER_10 - SIZE_BASE))
 echo "  After 10 1-row commits: ${SIZE_AFTER_10} bytes (growth: ${GROWTH})"
 
-# 10 commits × 1 row each. Each commit adds a commit object + catalog
-# chunk + small tree delta. Growth should be less than 3x the base
-# (generous bound to account for commit metadata overhead).
-THREE_X=$((SIZE_BASE * 3))
-assert_less "commits_sublinear" "$GROWTH" "$THREE_X"
+# 10 commits × 1 row each. With mergeWalk (always used for correctness,
+# applyEdits disabled due to #156), each commit rebuilds the full tree
+# producing duplicate chunks. Growth is proportional to table size × commits.
+# TODO: tighten to 3x when applyEdits is fixed and re-enabled (#158).
+TEN_X=$((SIZE_BASE * 10))
+assert_less "commits_sublinear" "$GROWTH" "$TEN_X"
 
 # Verify data integrity (in a fresh session)
 COUNT=$(echo "SELECT count(*) FROM t;" | $DOLTLITE "$DB" 2>&1)
