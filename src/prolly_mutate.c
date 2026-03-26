@@ -21,15 +21,28 @@
 ** Used to convert INTKEY values into a sortable byte representation
 ** for the chunker and node builder.
 */
-static void encodeI64LE(u8 *buf, i64 v){
-  buf[0] = (u8)(v);
-  buf[1] = (u8)(v >> 8);
-  buf[2] = (u8)(v >> 16);
-  buf[3] = (u8)(v >> 24);
-  buf[4] = (u8)(v >> 32);
-  buf[5] = (u8)(v >> 40);
-  buf[6] = (u8)(v >> 48);
-  buf[7] = (u8)(v >> 56);
+/*
+** Encode a signed 64-bit integer as 8 bytes in BIG-ENDIAN order.
+** Big-endian is required so that memcmp on encoded keys gives the
+** same order as numeric comparison — the prolly tree relies on
+** lexicographic key ordering.
+**
+** For signed integers, we XOR the sign bit so that negative values
+** sort before positive values in unsigned byte comparison:
+**   -1 → 7F FF FF FF FF FF FF FF
+**    0 → 80 00 00 00 00 00 00 00
+**    1 → 80 00 00 00 00 00 00 01
+*/
+static void encodeI64BE(u8 *buf, i64 v){
+  u64 u = (u64)v ^ ((u64)1 << 63);  /* flip sign bit */
+  buf[0] = (u8)(u >> 56);
+  buf[1] = (u8)(u >> 48);
+  buf[2] = (u8)(u >> 40);
+  buf[3] = (u8)(u >> 32);
+  buf[4] = (u8)(u >> 24);
+  buf[5] = (u8)(u >> 16);
+  buf[6] = (u8)(u >> 8);
+  buf[7] = (u8)(u);
 }
 
 /*
@@ -82,7 +95,7 @@ static int feedChunker(
   if( flags & PROLLY_NODE_INTKEY ){
     /* Encode integer key as 8-byte little-endian for the chunker. */
     u8 aKeyBuf[8];
-    encodeI64LE(aKeyBuf, intKey);
+    encodeI64BE(aKeyBuf, intKey);
     return prollyChunkerAdd(pCh, aKeyBuf, 8, pVal, nVal);
   }else{
     return prollyChunkerAdd(pCh, pKey, nKey, pVal, nVal);
@@ -310,7 +323,7 @@ static void getNodeKey(
 ){
   if( flags & PROLLY_NODE_INTKEY ){
     i64 ik = prollyNodeIntKey(pNode, idx);
-    encodeI64LE(aKeyBuf, ik);
+    encodeI64BE(aKeyBuf, ik);
     *ppKey = aKeyBuf;
     *pnKey = 8;
   }else{
@@ -437,7 +450,7 @@ static int applyEditsToLeaf(
         if( pE->op==PROLLY_EDIT_INSERT ){
           u8 aEditKey[8];
           if( pMut->flags & PROLLY_NODE_INTKEY ){
-            encodeI64LE(aEditKey, pE->intKey);
+            encodeI64BE(aEditKey, pE->intKey);
             rc = prollyNodeBuilderAdd(pBuilder, aEditKey, 8,
                                       pE->pVal, pE->nVal);
           }else{
@@ -482,7 +495,7 @@ static int applyEditsToLeaf(
           u8 aEditKey[8];
           const u8 *pEK; int nEK;
           if( pMut->flags & PROLLY_NODE_INTKEY ){
-            encodeI64LE(aEditKey, pT->intKey);
+            encodeI64BE(aEditKey, pT->intKey);
             pEK = aEditKey; nEK = 8;
           }else{
             pEK = pT->pKey; nEK = pT->nKey;
@@ -507,7 +520,7 @@ static int applyEditsToLeaf(
         u8 aEditKey[8];
         const u8 *pEK; int nEK;
         if( pMut->flags & PROLLY_NODE_INTKEY ){
-          encodeI64LE(aEditKey, pIterAfter->intKey);
+          encodeI64BE(aEditKey, pIterAfter->intKey);
           pEK = aEditKey; nEK = 8;
         }else{
           pEK = pIterAfter->pKey; nEK = pIterAfter->nKey;
@@ -872,11 +885,15 @@ int prollyMutateFlush(ProllyMutator *pMut){
       threshold = N / 2;
     }
 
-    if( M > threshold ){
-      return mergeWalk(pMut);
-    }else{
-      return applyEdits(pMut);
+    if( prollyHashIsEmpty(&pMut->oldRoot) ){
+      /* Empty tree — build from scratch */
+      return buildFromEdits(pMut);
     }
+    /* Always use mergeWalk for correctness. applyEdits has a bug with
+    ** INTKEY tables at scale where it produces corrupt trees (#156).
+    ** mergeWalk is O(N+M) but always correct. */
+    (void)threshold;
+    return mergeWalk(pMut);
   }
 }
 
