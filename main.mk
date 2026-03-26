@@ -2388,6 +2388,14 @@ libdoltlite$(T.dll):	$(LIBOBJS0)
 doltlite-lib: libdoltlite$(T.lib) libdoltlite$(T.dll)
 all: doltlite-lib
 
+#
+# doltlite-remotesrv: standalone HTTP server for serving doltlite databases.
+#
+doltlite-remotesrv$(T.exe):	$(TOP)/src/remotesrv_main.c $(LIBOBJS0)
+	$(T.link) -o $@ $(TOP)/src/remotesrv_main.c $(LIBOBJS0) \
+		$(LDFLAGS.libsqlite3)
+all: doltlite-remotesrv$(T.exe)
+
 install-doltlite-lib: libdoltlite$(T.lib) libdoltlite$(T.dll) $(install-dir.lib)
 	$(INSTALL.noexec) libdoltlite$(T.lib) "$(install-dir.lib)"
 	$(INSTALL) libdoltlite$(T.dll) "$(install-dir.lib)"
