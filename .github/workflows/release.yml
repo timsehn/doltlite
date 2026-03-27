@@ -106,7 +106,8 @@ jobs:
         ../configure
         make -j$(nproc) doltlite.exe doltlite-lib
 
-    - name: Package CLI tools
+    - name: Package CLI tools (Unix)
+      if: runner.os != 'Windows'
       shell: bash
       run: |
         VERSION=${GITHUB_REF_NAME#v}
@@ -117,6 +118,17 @@ jobs:
         strip "${DIR}/doltlite${{ matrix.ext }}" 2>/dev/null || true
         strip "${DIR}/doltlite-remotesrv${{ matrix.ext }}" 2>/dev/null || true
         zip -r "${DIR}.zip" "${DIR}"
+
+    - name: Package CLI tools (Windows)
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        VERSION=${GITHUB_REF_NAME#v}
+        DIR="doltlite-tools-${{ matrix.target }}-${VERSION}"
+        mkdir -p "${DIR}"
+        cp build/doltlite${{ matrix.ext }} "${DIR}/"
+        strip "${DIR}/doltlite${{ matrix.ext }}" 2>/dev/null || true
+        7z a "${DIR}.zip" "${DIR}"
 
     - name: Ad-hoc codesign (macOS)
       if: runner.os == 'macOS'
@@ -138,7 +150,11 @@ jobs:
         cp build/sqlite3.h "${DIR}/doltlite.h" 2>/dev/null || true
         cp build/libdoltlite${{ matrix.static_ext }} "${DIR}/" 2>/dev/null || true
         cp build/libdoltlite${{ matrix.lib_ext }} "${DIR}/" 2>/dev/null || true
-        zip -r "${DIR}.zip" "${DIR}"
+        if command -v zip >/dev/null 2>&1; then
+          zip -r "${DIR}.zip" "${DIR}"
+        else
+          7z a "${DIR}.zip" "${DIR}"
+        fi
 
     - name: Upload binary artifacts
       uses: actions/upload-artifact@v4
