@@ -919,6 +919,32 @@ run_parity "concatenation" "
 SELECT 'hello' || ' ' || 'world';
 "
 
+# --- Multi-row DELETE (issue #168) ---
+
+run_parity "delete_multi_row" "
+CREATE TABLE dt(id INT PRIMARY KEY, val INT);
+INSERT INTO dt VALUES(1,1),(2,2),(3,3),(4,4),(5,5);
+DELETE FROM dt WHERE id>2;
+SELECT count(*) FROM dt;
+SELECT id FROM dt ORDER BY id;
+"
+
+run_parity "delete_without_rowid" "
+CREATE TABLE dw(id INT PRIMARY KEY, val INT) WITHOUT ROWID;
+INSERT INTO dw VALUES(1,1),(2,2),(3,3),(4,4),(5,5);
+DELETE FROM dw WHERE id>2;
+SELECT count(*) FROM dw;
+SELECT id FROM dw ORDER BY id;
+"
+
+run_parity "delete_modulo" "
+CREATE TABLE dm(id INT PRIMARY KEY, val INT);
+WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<100)
+INSERT INTO dm SELECT x,x FROM c;
+DELETE FROM dm WHERE id%10=0;
+SELECT count(*) FROM dm;
+"
+
 # ================================================================
 # Summary
 # ================================================================

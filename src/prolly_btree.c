@@ -3230,7 +3230,10 @@ int sqlite3BtreeDelete(BtCursor *pCur, u8 flags){
     if( canDefer ){
       rc = btreeDeleteDeferred(pCur, pKey, nKey, iKey);
       if( rc!=SQLITE_OK ) return rc;
-      if( (flags & BTREE_SAVEPOSITION) && pCur->curIntKey ){
+      if( flags & BTREE_SAVEPOSITION ){
+        /* Cursor is still positioned at the deleted entry in the tree
+        ** (deletion is deferred in MutMap). CURSOR_SKIPNEXT with
+        ** skipNext=0 causes the next BtreeNext to advance normally. */
         pCur->eState = CURSOR_SKIPNEXT;
         pCur->skipNext = 0;
       } else {
