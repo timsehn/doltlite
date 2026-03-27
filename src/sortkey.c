@@ -461,15 +461,20 @@ int recordFromSortKey(const u8 *pSortKey, int nSortKey, u8 **ppOut, int *pnOut){
       }else{
         /* Text or blob — decode from sort key NUL-escaped data */
         const u8 *pSrc = aFieldPtr[i];
+        const u8 *pSrcEnd = pSortKey + nSortKey;
         int j = 0;
         u32 written = 0;
         while( written < fieldLen ){
-          if( pSrc[j] == 0x00 && pSrc[j+1] == 0x01 ){
+          if( pSrc+j+1 < pSrcEnd
+           && pSrc[j] == 0x00 && pSrc[j+1] == 0x01 ){
             pOut[off++] = 0x00;
             j += 2;
-          }else{
+          }else if( pSrc+j < pSrcEnd ){
             pOut[off++] = pSrc[j];
             j++;
+          }else{
+            /* Truncated sort key — pad with zero */
+            pOut[off++] = 0x00;
           }
           written++;
         }

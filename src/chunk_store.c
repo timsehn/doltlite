@@ -1756,12 +1756,14 @@ static int csCommitToFile(ChunkStore *cs){
     ChunkIndexEntry *aMerged = 0;
     int nMerged = 0;
     rc = csMergeIndex(cs, &aMerged, &nMerged);
-    if( rc == SQLITE_OK ){
-      sqlite3_free(cs->aIndex);
-      cs->aIndex = aMerged;
-      cs->nIndex = nMerged;
-      cs->nIndexAlloc = nMerged;
+    if( rc!=SQLITE_OK ){
+      sqlite3_free(aMerged);
+      return rc;
     }
+    sqlite3_free(cs->aIndex);
+    cs->aIndex = aMerged;
+    cs->nIndex = nMerged;
+    cs->nIndexAlloc = nMerged;
   }
 
   /* Clear pending state */
@@ -1770,7 +1772,7 @@ static int csCommitToFile(ChunkStore *cs){
   cs->nWriteBuf = 0;
   cs->nWriteBufAlloc = 0;
   cs->nPending = 0;
-    csPendHTClear(cs);
+  csPendHTClear(cs);
 
   return SQLITE_OK;
 }

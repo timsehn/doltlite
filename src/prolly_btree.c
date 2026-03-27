@@ -2256,7 +2256,11 @@ int sqlite3BtreeTableMoveto(
         ** Without this, BtreeNext crashes on an unpositioned cursor
         ** when pPending edits are carried across savepoints. */
         refreshCursorRoot(pCur);
-        prollyCursorSeekInt(&pCur->pCur, intKey, &(int){0});
+        {
+          int seekRes = 0;
+          rc = prollyCursorSeekInt(&pCur->pCur, intKey, &seekRes);
+          if( rc!=SQLITE_OK ) return rc;
+        }
         return SQLITE_OK;
       } else {
         /* Key is pending DELETE — doesn't exist */
@@ -2706,8 +2710,9 @@ no_match:
   ** Position at the last entry if possible. */
   {
     int lastRes = 0;
-    int rc2 = prollyCursorLast(&pCur->pCur, &lastRes);
-    if( rc2==SQLITE_OK && lastRes==0 ){
+    rc = prollyCursorLast(&pCur->pCur, &lastRes);
+    if( rc!=SQLITE_OK ) return rc;
+    if( lastRes==0 ){
       pCur->eState = CURSOR_VALID;
       *pRes = -1;
     } else {
