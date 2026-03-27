@@ -341,10 +341,13 @@ static int streamingMerge(
       }
 
       if( !subtreeHasEdits(pMut->flags, &iter,
-                           pBoundKey, nBoundKey, iBoundKey) ){
-        /* No edits in this subtree — flush level 0 and skip */
-        rc = prollyChunkerFlushLevel(&chunker, 0);
-        if( rc!=SQLITE_OK ) goto streaming_cleanup;
+                           pBoundKey, nBoundKey, iBoundKey)
+       && (chunker.nLevels == 0
+           || chunker.aLevel[0].builder.nItems == 0) ){
+        /* No edits in this subtree AND level-0 is empty (naturally
+        ** at a chunk boundary). Skip by emitting hash at parent level.
+        ** If level-0 has pending items, we must descend to preserve
+        ** chunk boundary alignment with the original tree. */
         rc = prollyChunkerAddAtLevel(&chunker, rootNode.level,
                                       pBoundKey, nBoundKey,
                                       pChildVal, nChildVal);
