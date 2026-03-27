@@ -143,10 +143,15 @@ jobs:
         find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) -exec mv {} . \;
         ls -la *.zip *.tar.gz
 
-        # Upload all artifacts that were successfully built
+        # Create release if it doesn't already exist (may have been
+        # created manually with release notes before the workflow ran)
+        if ! gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "Doltlite ${VERSION}" \
+            --generate-notes
+        fi
+
+        # Upload artifacts to the release
         ASSETS=$(find . -maxdepth 1 \( -name "*.zip" -o -name "*.tar.gz" \) -print)
         echo "Uploading: ${ASSETS}"
-        gh release create "${GITHUB_REF_NAME}" \
-          --title "Doltlite ${VERSION}" \
-          --generate-notes \
-          ${ASSETS}
+        gh release upload "${GITHUB_REF_NAME}" ${ASSETS} --clobber
