@@ -104,7 +104,7 @@ jobs:
       run: |
         mkdir -p build && cd build
         ../configure
-        make -j$(nproc) doltlite doltlite-remotesrv doltlite-lib
+        make -j$(nproc) doltlite.exe doltlite-lib
 
     - name: Package CLI tools
       shell: bash
