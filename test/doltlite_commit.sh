@@ -176,9 +176,77 @@ run_test_match "log_select_columns" \
   "SELECT commit_hash, committer, email, date, message FROM dolt_log LIMIT 1;" \
   "." "$DB"
 
+# --- Compound short flags (e.g. -am) ---
+
+DB5=/tmp/test_dolt_compound_$$.db; rm -f "$DB5"
+
+# -am: stages all + sets message in one compound flag
+run_test_match "compound_am" \
+  "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+INSERT INTO t VALUES(1,'a');
+SELECT dolt_commit('-am','compound flag commit');" \
+  "^[0-9a-f]{40}$" "$DB5"
+
+run_test "compound_am_message" \
+  "SELECT message FROM dolt_log LIMIT 1;" \
+  "compound flag commit" "$DB5"
+
+run_test "compound_am_data" \
+  "SELECT v FROM t WHERE id=1;" \
+  "a" "$DB5"
+
+# -Am: uppercase A variant
+DB6=/tmp/test_dolt_compound2_$$.db; rm -f "$DB6"
+
+run_test_match "compound_Am" \
+  "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);
+INSERT INTO t VALUES(1,'b');
+SELECT dolt_commit('-Am','uppercase A compound');" \
+  "^[0-9a-f]{40}$" "$DB6"
+
+run_test "compound_Am_message" \
+  "SELECT message FROM dolt_log LIMIT 1;" \
+  "uppercase A compound" "$DB6"
+
+# -ma means -m with value "a" (no add-all), so needs dolt_add first
+DB7=/tmp/test_dolt_compound3_$$.db; rm -f "$DB7"
+
+run_test_match "compound_ma_with_add" \
+  "CREATE TABLE t(id INTEGER PRIMARY KEY);
+INSERT INTO t VALUES(1);
+SELECT dolt_add('-A');
+SELECT dolt_commit('-ma');" \
+  "^[0-9a-f]{40}$" "$DB7"
+
+run_test "compound_ma_message_is_a" \
+  "SELECT message FROM dolt_log LIMIT 1;" \
+  "a" "$DB7"
+
+# Multiple commits with -am
+DB8=/tmp/test_dolt_compound4_$$.db; rm -f "$DB8"
+
+run_test_match "compound_am_multi_1" \
+  "CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER);
+INSERT INTO t VALUES(1,10);
+SELECT dolt_commit('-am','first');" \
+  "^[0-9a-f]{40}$" "$DB8"
+
+run_test_match "compound_am_multi_2" \
+  "INSERT INTO t VALUES(2,20);
+SELECT dolt_commit('-am','second');" \
+  "^[0-9a-f]{40}$" "$DB8"
+
+run_test "compound_am_multi_count" \
+  "SELECT count(*) FROM dolt_log;" \
+  "2" "$DB8"
+
+run_test "compound_am_multi_data" \
+  "SELECT count(*) FROM t;" \
+  "2" "$DB8"
+
 # --- Cleanup ---
 
-rm -f "$DB" "$DB2" "$DB3" "$DB4"
+rm -f "$DB" "$DB2" "$DB3" "$DB4" "$DB5" "$DB6" "$DB7" "$DB8"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"

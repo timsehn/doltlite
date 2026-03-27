@@ -328,11 +328,30 @@ static void doltliteCommitFunc(
     return;
   }
 
-  /* Parse arguments */
+  /* Parse arguments.  Supports compound short flags like "-am" which
+  ** expands to "-a" + "-m".  The last flag in a compound group can
+  ** consume the next argv element as its value (e.g. "-am" "msg"). */
   for(i=0; i<argc; i++){
     const char *arg = (const char*)sqlite3_value_text(argv[i]);
     if( !arg ) continue;
-    if( strcmp(arg, "-m")==0 && i+1<argc ){
+    if( arg[0]=='-' && arg[1]!='-' && arg[1]!=0 && arg[2]!=0 ){
+      /* Compound short flags, e.g. "-am", "-Am" */
+      int j;
+      for(j=1; arg[j]; j++){
+        if( arg[j]=='a' || arg[j]=='A' ){
+          addAll = 1;
+        }else if( arg[j]=='m' ){
+          /* -m takes a value: remaining chars in compound (e.g. "-mfoo")
+          ** or the next argv element (e.g. "-am" "foo"). */
+          if( arg[j+1]!=0 ){
+            zMessage = &arg[j+1];
+          }else if( i+1<argc ){
+            zMessage = (const char*)sqlite3_value_text(argv[++i]);
+          }
+          break;  /* -m must be last in compound group (takes a value) */
+        }
+      }
+    }else if( strcmp(arg, "-m")==0 && i+1<argc ){
       zMessage = (const char*)sqlite3_value_text(argv[++i]);
     }else if( strcmp(arg, "--author")==0 && i+1<argc ){
       zAuthor = (const char*)sqlite3_value_text(argv[++i]);
