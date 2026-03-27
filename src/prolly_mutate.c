@@ -144,6 +144,327 @@ static int buildFromEdits(
   return rc;
 }
 
+static int mergeWalk(ProllyMutator *pMut);
+
+/*
+** Check if the next edit key is within a subtree's key range.
+** Returns 1 if the edit key <= the subtree's boundary key (has edits),
+** 0 if the edit key > boundary key (no edits in this subtree).
+** If no edits remain, returns 0.
+*/
+static int subtreeHasEdits(
+  u8 flags,
+  ProllyMutMapIter *pIter,
+  const u8 *pBoundKey, int nBoundKey, i64 iBoundKey
+){
+  ProllyMutMapEntry *pEd;
+  int cmp;
+  if( !prollyMutMapIterValid(pIter) ) return 0;
+  pEd = prollyMutMapIterEntry(pIter);
+  cmp = compareKeys(flags, pEd->pKey, pEd->nKey, pEd->intKey,
+                    pBoundKey, nBoundKey, iBoundKey);
+  return (cmp <= 0);  /* edit key <= boundary key means edits in this subtree */
+}
+
+/*
+** Merge a single leaf node's entries with the edit iterator.
+** Feeds merged entries into the chunker at level 0.
+** Advances the edit iterator past all edits consumed.
+*/
+static int mergeLeaf(
+  ProllyMutator *pMut,
+  ProllyNode *pLeaf,
+  ProllyChunker *pCh,
+  ProllyMutMapIter *pIter
+){
+  int rc = SQLITE_OK;
+  int j;
+  u8 flags = pMut->flags;
+
+  for( j = 0; j < pLeaf->nItems; ){
+    int haveEdit = prollyMutMapIterValid(pIter);
+    ProllyMutMapEntry *pEd = haveEdit ? prollyMutMapIterEntry(pIter) : 0;
+
+    const u8 *pCurKey; int nCurKey;
+    i64 iCurKey = 0;
+    u8 aKeyBuf[8];
+
+    if( flags & PROLLY_NODE_INTKEY ){
+      iCurKey = prollyNodeIntKey(pLeaf, j);
+      encodeI64BE(aKeyBuf, iCurKey);
+      pCurKey = aKeyBuf; nCurKey = 8;
+    }else{
+      prollyNodeKey(pLeaf, j, &pCurKey, &nCurKey);
+    }
+
+    if( !haveEdit ){
+      /* No more edits — emit remaining leaf entries */
+      const u8 *pVal; int nVal;
+      prollyNodeValue(pLeaf, j, &pVal, &nVal);
+      rc = prollyChunkerAdd(pCh, pCurKey, nCurKey, pVal, nVal);
+      if( rc!=SQLITE_OK ) return rc;
+      j++;
+      continue;
+    }
+
+    /* Check if edit is past this leaf */
+    {
+      const u8 *pLastKey; int nLastKey;
+      i64 iLastKey = 0;
+      u8 aLastBuf[8];
+      if( flags & PROLLY_NODE_INTKEY ){
+        iLastKey = prollyNodeIntKey(pLeaf, pLeaf->nItems - 1);
+        encodeI64BE(aLastBuf, iLastKey);
+        pLastKey = aLastBuf; nLastKey = 8;
+      }else{
+        prollyNodeKey(pLeaf, pLeaf->nItems - 1, &pLastKey, &nLastKey);
+      }
+      int pastLeaf = compareKeys(flags, pEd->pKey, pEd->nKey, pEd->intKey,
+                                 pLastKey, nLastKey, iLastKey);
+      if( pastLeaf > 0 ){
+        /* Edit is past this leaf — emit remaining entries and return */
+        const u8 *pVal; int nVal;
+        prollyNodeValue(pLeaf, j, &pVal, &nVal);
+        rc = prollyChunkerAdd(pCh, pCurKey, nCurKey, pVal, nVal);
+        if( rc!=SQLITE_OK ) return rc;
+        j++;
+        continue;
+      }
+    }
+
+    /* Compare current entry with edit */
+    int cmp = compareKeys(flags, pCurKey, nCurKey, iCurKey,
+                          pEd->pKey, pEd->nKey, pEd->intKey);
+    if( cmp < 0 ){
+      /* Old entry first */
+      const u8 *pVal; int nVal;
+      prollyNodeValue(pLeaf, j, &pVal, &nVal);
+      rc = prollyChunkerAdd(pCh, pCurKey, nCurKey, pVal, nVal);
+      if( rc!=SQLITE_OK ) return rc;
+      j++;
+    }else if( cmp == 0 ){
+      /* Replace or delete */
+      if( pEd->op==PROLLY_EDIT_INSERT ){
+        u8 aEditKey[8];
+        const u8 *pEK; int nEK;
+        if( flags & PROLLY_NODE_INTKEY ){
+          encodeI64BE(aEditKey, pEd->intKey);
+          pEK = aEditKey; nEK = 8;
+        }else{
+          pEK = pEd->pKey; nEK = pEd->nKey;
+        }
+        rc = prollyChunkerAdd(pCh, pEK, nEK, pEd->pVal, pEd->nVal);
+        if( rc!=SQLITE_OK ) return rc;
+      }
+      j++;
+      prollyMutMapIterNext(pIter);
+    }else{
+      /* Insert new entry before old */
+      if( pEd->op==PROLLY_EDIT_INSERT ){
+        u8 aEditKey[8];
+        const u8 *pEK; int nEK;
+        if( flags & PROLLY_NODE_INTKEY ){
+          encodeI64BE(aEditKey, pEd->intKey);
+          pEK = aEditKey; nEK = 8;
+        }else{
+          pEK = pEd->pKey; nEK = pEd->nKey;
+        }
+        rc = prollyChunkerAdd(pCh, pEK, nEK, pEd->pVal, pEd->nVal);
+        if( rc!=SQLITE_OK ) return rc;
+      }
+      prollyMutMapIterNext(pIter);
+    }
+  }
+  return SQLITE_OK;
+}
+
+/*
+** Streaming merge: walk the old tree's internal nodes alongside the edit
+** iterator. Skip unchanged subtrees by emitting their hash directly at
+** the parent level. Only descend into subtrees that contain edits.
+**
+** For height-1 trees (root → leaves): O(M * L + S) where M = edits,
+** L = leaf size, S = number of skipped subtrees. Much faster than
+** mergeWalk's O(N + M) when M << N.
+**
+** For height-0 trees (leaf root): falls through to mergeWalk.
+*/
+static int streamingMerge(
+  ProllyMutator *pMut
+){
+  ProllyChunker chunker;
+  ProllyMutMapIter iter;
+  int rc;
+  u8 *pRootData = 0;
+  int nRootData = 0;
+  ProllyNode rootNode;
+  ProllyCache *pCache = pMut->pCache;
+
+  /* Load root node */
+  rc = chunkStoreGet(pMut->pStore, &pMut->oldRoot, &pRootData, &nRootData);
+  if( rc!=SQLITE_OK ) return rc;
+  rc = prollyNodeParse(&rootNode, pRootData, nRootData);
+  if( rc!=SQLITE_OK ){
+    sqlite3_free(pRootData);
+    return rc;
+  }
+
+  /* Height-0 tree: single leaf, use mergeWalk */
+  if( rootNode.level == 0 ){
+    sqlite3_free(pRootData);
+    return mergeWalk(pMut);
+  }
+
+  prollyMutMapIterFirst(&iter, pMut->pEdits);
+  rc = prollyChunkerInit(&chunker, pMut->pStore, pMut->flags);
+  if( rc!=SQLITE_OK ){
+    sqlite3_free(pRootData);
+    return rc;
+  }
+
+  /* Walk root node's children (level-1 entries) */
+  {
+    int i;
+    for( i = 0; i < rootNode.nItems; i++ ){
+      const u8 *pBoundKey; int nBoundKey;
+      const u8 *pChildVal; int nChildVal;
+      i64 iBoundKey = 0;
+      u8 aBoundBuf[8];
+
+      prollyNodeKey(&rootNode, i, &pBoundKey, &nBoundKey);
+      prollyNodeValue(&rootNode, i, &pChildVal, &nChildVal);
+
+      if( pMut->flags & PROLLY_NODE_INTKEY ){
+        iBoundKey = prollyNodeIntKey(&rootNode, i);
+        encodeI64BE(aBoundBuf, iBoundKey);
+        pBoundKey = aBoundBuf; nBoundKey = 8;
+      }
+
+      if( !subtreeHasEdits(pMut->flags, &iter,
+                           pBoundKey, nBoundKey, iBoundKey) ){
+        /* No edits in this subtree — flush level 0 and skip */
+        rc = prollyChunkerFlushLevel(&chunker, 0);
+        if( rc!=SQLITE_OK ) goto streaming_cleanup;
+        rc = prollyChunkerAddAtLevel(&chunker, rootNode.level,
+                                      pBoundKey, nBoundKey,
+                                      pChildVal, nChildVal);
+        if( rc!=SQLITE_OK ) goto streaming_cleanup;
+      }else{
+        /* Subtree has edits — load child and merge at leaf level */
+        if( rootNode.level == 1 ){
+          /* Child is a leaf — merge directly */
+          ProllyHash childHash;
+          ProllyCacheEntry *pChildEntry;
+          u8 *pChildData = 0;
+          int nChildData = 0;
+
+          assert( nChildVal == PROLLY_HASH_SIZE );
+          memcpy(&childHash, pChildVal, PROLLY_HASH_SIZE);
+          pChildEntry = prollyCacheGet(pCache, &childHash);
+          if( !pChildEntry ){
+            rc = chunkStoreGet(pMut->pStore, &childHash, &pChildData, &nChildData);
+            if( rc!=SQLITE_OK ) goto streaming_cleanup;
+            pChildEntry = prollyCachePut(pCache, &childHash, pChildData, nChildData);
+            sqlite3_free(pChildData);
+            if( !pChildEntry ){ rc = SQLITE_NOMEM; goto streaming_cleanup; }
+          }
+
+          rc = mergeLeaf(pMut, &pChildEntry->node, &chunker, &iter);
+          prollyCacheRelease(pCache, pChildEntry);
+          if( rc!=SQLITE_OK ) goto streaming_cleanup;
+        }else{
+          /* TODO: recurse for height > 2 trees. For now, fall back
+          ** to walking all entries in this subtree. */
+          ProllyCursor subCur;
+          ProllyHash childHash;
+          int subEmpty;
+
+          assert( nChildVal == PROLLY_HASH_SIZE );
+          memcpy(&childHash, pChildVal, PROLLY_HASH_SIZE);
+          prollyCursorInit(&subCur, pMut->pStore, pMut->pCache,
+                           &childHash, pMut->flags);
+          rc = prollyCursorFirst(&subCur, &subEmpty);
+          if( rc!=SQLITE_OK ){
+            prollyCursorClose(&subCur);
+            goto streaming_cleanup;
+          }
+          while( prollyCursorIsValid(&subCur) ){
+            const u8 *pK; int nK;
+            const u8 *pV; int nV;
+            i64 iK = 0;
+            if( pMut->flags & PROLLY_NODE_INTKEY ){
+              iK = prollyCursorIntKey(&subCur);
+              pK = 0; nK = 0;
+            }else{
+              prollyCursorKey(&subCur, &pK, &nK);
+            }
+            prollyCursorValue(&subCur, &pV, &nV);
+
+            /* Check if current entry should be merged with edit */
+            if( prollyMutMapIterValid(&iter) ){
+              ProllyMutMapEntry *pEd = prollyMutMapIterEntry(&iter);
+              int cmp = compareKeys(pMut->flags, pK, nK, iK,
+                                    pEd->pKey, pEd->nKey, pEd->intKey);
+              if( cmp < 0 ){
+                rc = feedChunker(&chunker, pMut->flags, pK, nK, iK, pV, nV);
+                if( rc!=SQLITE_OK ){ prollyCursorClose(&subCur); goto streaming_cleanup; }
+                rc = prollyCursorNext(&subCur);
+                if( rc!=SQLITE_OK ){ prollyCursorClose(&subCur); goto streaming_cleanup; }
+              }else if( cmp == 0 ){
+                if( pEd->op==PROLLY_EDIT_INSERT ){
+                  rc = feedChunker(&chunker, pMut->flags,
+                                   pEd->pKey, pEd->nKey, pEd->intKey,
+                                   pEd->pVal, pEd->nVal);
+                  if( rc!=SQLITE_OK ){ prollyCursorClose(&subCur); goto streaming_cleanup; }
+                }
+                rc = prollyCursorNext(&subCur);
+                if( rc!=SQLITE_OK ){ prollyCursorClose(&subCur); goto streaming_cleanup; }
+                prollyMutMapIterNext(&iter);
+              }else{
+                if( pEd->op==PROLLY_EDIT_INSERT ){
+                  rc = feedChunker(&chunker, pMut->flags,
+                                   pEd->pKey, pEd->nKey, pEd->intKey,
+                                   pEd->pVal, pEd->nVal);
+                  if( rc!=SQLITE_OK ){ prollyCursorClose(&subCur); goto streaming_cleanup; }
+                }
+                prollyMutMapIterNext(&iter);
+              }
+            }else{
+              rc = feedChunker(&chunker, pMut->flags, pK, nK, iK, pV, nV);
+              if( rc!=SQLITE_OK ){ prollyCursorClose(&subCur); goto streaming_cleanup; }
+              rc = prollyCursorNext(&subCur);
+              if( rc!=SQLITE_OK ){ prollyCursorClose(&subCur); goto streaming_cleanup; }
+            }
+          }
+          prollyCursorClose(&subCur);
+        }
+      }
+    }
+  }
+
+  /* Handle remaining edits past the tree's last key */
+  while( prollyMutMapIterValid(&iter) ){
+    ProllyMutMapEntry *pEd = prollyMutMapIterEntry(&iter);
+    if( pEd->op==PROLLY_EDIT_INSERT ){
+      rc = feedChunker(&chunker, pMut->flags,
+                       pEd->pKey, pEd->nKey, pEd->intKey,
+                       pEd->pVal, pEd->nVal);
+      if( rc!=SQLITE_OK ) goto streaming_cleanup;
+    }
+    prollyMutMapIterNext(&iter);
+  }
+
+  rc = prollyChunkerFinish(&chunker);
+  if( rc==SQLITE_OK ){
+    prollyChunkerGetRoot(&chunker, &pMut->newRoot);
+  }
+
+streaming_cleanup:
+  prollyChunkerFree(&chunker);
+  sqlite3_free(pRootData);
+  return rc;
+}
+
 /*
 ** Merge-walk the existing tree with the edit map and produce a new tree.
 ** O(N + M) — walks every entry regardless of edit count.
@@ -888,11 +1209,14 @@ int prollyMutateFlush(ProllyMutator *pMut){
     if( prollyHashIsEmpty(&pMut->oldRoot) ){
       return buildFromEdits(pMut);
     }
-    /* Always use mergeWalk for correctness. applyEdits has a bug with
-    ** INTKEY tables at scale where it produces corrupt trees (#158).
-    ** mergeWalk is O(N+M) but always correct. */
-    (void)threshold;
-    return mergeWalk(pMut);
+    /* Use streamingMerge for small edit sets — it skips unchanged
+    ** subtrees for O(M * L) instead of mergeWalk's O(N + M).
+    ** Fall back to mergeWalk when edits are a large fraction of the tree. */
+    if( M > threshold ){
+      return mergeWalk(pMut);
+    }else{
+      return streamingMerge(pMut);
+    }
   }
 }
 

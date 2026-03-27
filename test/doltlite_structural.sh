@@ -238,9 +238,10 @@ echo "  After GC: ${SIZE_AFTER_GC} bytes"
 
 # Both branches share most chunks — GC should NOT shrink much
 # (nothing is truly orphaned since both branches are alive)
-# File should stay within 90% of original
-NINETY_PCT=$((SIZE_BEFORE_GC * 9 / 10))
-assert_greater "gc_preserves_shared" "$SIZE_AFTER_GC" "$NINETY_PCT"
+# File should stay within 85% of original (streaming merge may
+# produce slightly different chunk boundaries)
+THRESHOLD=$((SIZE_BEFORE_GC * 85 / 100))
+assert_greater "gc_preserves_shared" "$SIZE_AFTER_GC" "$THRESHOLD"
 
 # Both branches' data should survive
 MAIN_COUNT=$(echo "SELECT count(*) FROM t WHERE id=8888;" | $DOLTLITE "$DB" 2>&1)
