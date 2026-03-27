@@ -12,11 +12,23 @@ prolly tree engine backed by a single-file content-addressed chunk store.
 
 ## Building
 
+### macOS / Linux
+
 ```
 cd build
 ../configure
 make
 ./doltlite :memory:
+```
+
+### Windows (MSYS2 / MINGW64)
+
+```
+pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib make tcl
+mkdir -p build && cd build
+../configure
+make doltlite.exe
+./doltlite.exe :memory:
 ```
 
 To verify the engine:
@@ -112,6 +124,9 @@ SELECT dolt_commit('-m', 'Add users table');
 
 -- Stage and commit in one step
 SELECT dolt_commit('-A', '-m', 'Initial commit');
+
+-- Shorthand (compound flags, like git commit -am)
+SELECT dolt_commit('-am', 'Initial commit');
 
 -- Commit with author
 SELECT dolt_commit('-m', 'Fix data', '--author', 'Alice <alice@example.com>');
@@ -417,6 +432,81 @@ The server is also embeddable as a library (`doltliteServeAsync` in
 Content-addressed chunk transfer — only sends chunks the remote doesn't already
 have. BFS traversal of the DAG with batch `HasMany` pruning.
 
+## Using Existing SQLite Databases
+
+Doltlite can ATTACH standard SQLite databases alongside its own prolly-tree
+storage. This lets you keep versioned tables in doltlite and high-write
+operational tables in standard SQLite, queried through a single connection.
+
+Doltlite detects the file format automatically from the header — no
+configuration needed. Standard SQLite files route to SQLite's original B-tree
+engine; everything else uses the prolly tree.
+
+### Basic ATTACH
+
+```sql
+-- Attach a standard SQLite database
+ATTACH DATABASE '/path/to/events.sqlite' AS ops;
+
+-- Query it (prefix table names with the alias)
+SELECT * FROM ops.events WHERE type='click';
+
+-- Main db tables need no prefix
+SELECT * FROM threads;
+
+-- Detach when done
+DETACH DATABASE ops;
+```
+
+### Cross-Database JOINs
+
+```sql
+-- Join doltlite (versioned) tables with SQLite (attached) tables
+SELECT t.title, e.type
+FROM threads t
+JOIN ops.events e ON t.id = e.thread_id;
+```
+
+### Migrating Data Between Formats
+
+```sql
+-- Copy from SQLite into doltlite (now versioned)
+INSERT INTO threads SELECT * FROM ops.threads;
+
+-- Copy from doltlite into SQLite (for export)
+INSERT INTO ops.archive SELECT * FROM threads WHERE archived=1;
+
+-- One-step copy with CREATE TABLE...AS
+CREATE TABLE local_events AS SELECT * FROM ops.events;
+```
+
+### Hybrid Storage Pattern
+
+Use doltlite for tables that benefit from version control, and standard SQLite
+for high-throughput tables that don't need history:
+
+```sql
+-- Main DB: doltlite (versioned)
+CREATE TABLE config(key TEXT PRIMARY KEY, val TEXT);
+SELECT dolt_commit('-am', 'Add config table');
+
+-- Attached: standard SQLite (high-write, no versioning overhead)
+ATTACH DATABASE 'telemetry.sqlite' AS tel;
+CREATE TABLE tel.events(seq INTEGER PRIMARY KEY, kind TEXT, payload TEXT);
+
+-- Hot write path goes to standard SQLite
+INSERT INTO tel.events VALUES(1, 'pageview', '{"url":"/home"}');
+
+-- Analytics spans both databases
+SELECT c.val, count(e.seq)
+FROM config c
+JOIN tel.events e ON e.kind = c.key
+GROUP BY c.key;
+
+-- Version control only applies to main db
+SELECT * FROM dolt_diff('config');
+```
+
 ## Per-Session Branching Architecture
 
 SQLite's `Btree` struct is per-connection. Doltlite stores each session's
@@ -508,7 +598,7 @@ multiplier from 380x down to ~12x.
 All numbers below have automated assertions in CI (`test/doltlite_perf.sh` and `test/doltlite_structural.sh`).
 
 - **O(log n) Point Operations** -- SELECT, UPDATE, and DELETE by primary key are O(log n), essentially constant time from 1K to 1M rows. Tested and asserted at 1K, 100K, and 1M rows.
-- **O(n log n) Bulk Insert** -- Bulk INSERT inside BEGIN/COMMIT scales as O(n log n). 1M rows inserts in ~2 seconds.
+- **O(n log n) Bulk Insert** -- Bulk INSERT inside BEGIN/COMMIT scales as O(n log n). 1M rows inserts in ~2 seconds. CTE-based inserts also scale linearly (5M rows in 11s).
 - **O(changes) Diff** -- `dolt_diff` between two commits is proportional to the number of changed rows, not the table size. A single-row diff on a 1M-row table takes the same time as on a 1K-row table (~30ms).
 - **Structural Sharing** -- The prolly tree provides structural sharing between versions. Changing 1 row in a 10K-row table adds only 1.9% to the file size (5.2KB on 273KB). Branch creation with 1 new row adds ~10% overhead.
 - **Garbage Collection** -- `dolt_gc()` reclaims orphaned chunks. Deleting a branch with 1000 unique rows and running GC reclaims 53% of file size. GC is idempotent and preserves all reachable data.
@@ -548,16 +638,20 @@ make testfixture DOLTLITE_PROLLY=0 USE_AMALGAMATION=1
 
 ### Doltlite Shell Tests
 
-Feature-specific shell tests in `test/`:
+31 test suites covering all features:
 
 ```bash
-bash test/doltlite_commit.sh
-bash test/doltlite_staging.sh
-bash test/doltlite_diff.sh
-bash test/doltlite_reset.sh
-bash test/doltlite_branch.sh
-bash test/doltlite_merge.sh
-bash test/doltlite_tag.sh
+# Run all suites
+cd build
+bash ../test/run_doltlite_tests.sh
+
+# Run individual suites
+bash ../test/doltlite_parity.sh          # SQLite compatibility (110 tests)
+bash ../test/doltlite_commit.sh          # Commits and log
+bash ../test/doltlite_staging.sh         # Add, status, staging
+bash ../test/doltlite_branch.sh          # Branching and checkout
+bash ../test/doltlite_merge.sh           # Three-way merge
+bash ../test/doltlite_attach_sqlite.sh   # ATTACH standard SQLite databases
 ```
 
 ### Concurrent Branch Test
@@ -592,6 +686,8 @@ gcc -o concurrent_branch_test ../test/concurrent_branch_test.c \
 | `sortkey.c/h` | Sort key encoding for memcmp-sortable index keys |
 | `chunk_store.c` | Single-file content-addressed chunk storage |
 | `pager_shim.c` | Pager facade (satisfies pager API without page-based I/O) |
+| `btree_orig_*.c` | Original SQLite btree compiled with renamed symbols (for ATTACH) |
+| `btree_orig_api.c/h` | Bridge API between prolly dispatch and original btree |
 
 ### Doltlite Feature Files
 
@@ -608,6 +704,13 @@ gcc -o concurrent_branch_test ../test/concurrent_branch_test.c \
 | `doltlite_ancestor.c` | Common ancestor search, `dolt_merge_base` |
 | `doltlite_commit.h` | Commit object serialization/deserialization |
 | `doltlite_ancestor.h` | Ancestor-finding API |
+| `doltlite_history.c` | `dolt_history_<table>` virtual table |
+| `doltlite_at.c` | `dolt_at_<table>` point-in-time query |
+| `doltlite_schema_diff.c` | `dolt_schema_diff` virtual table |
+| `doltlite_gc.c` | `dolt_gc` garbage collection |
+| `doltlite_remote.c` | Remote management (`dolt_remote`, `dolt_push`, `dolt_fetch`, `dolt_clone`) |
+| `doltlite_http_remote.c` | HTTP remote client (BSD sockets) |
+| `doltlite_remotesrv.c` | Standalone HTTP server for remotes |
 
 ## Dolt vs Doltlite: Storage Engine Comparison
 
