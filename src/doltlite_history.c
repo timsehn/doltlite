@@ -28,18 +28,7 @@ extern int doltliteLoadCatalog(sqlite3 *db, const ProllyHash *catHash,
                                struct TableEntry **ppTables, int *pnTables,
                                Pgno *piNextTable);
 
-/* --------------------------------------------------------------------------
-** Varint reader (big-endian SQLite format)
-** -------------------------------------------------------------------------- */
-
-static int htReadVarint(const u8 *p, const u8 *pEnd, u64 *pVal){
-  u64 v = 0; int i;
-  for(i=0; i<9 && p+i<pEnd; i++){
-    if(i<8){ v=(v<<7)|(p[i]&0x7f); if(!(p[i]&0x80)){*pVal=v; return i+1;} }
-    else{ v=(v<<8)|p[i]; *pVal=v; return 9; }
-  }
-  *pVal = v; return i?i:1;
-}
+/* Varint reader: use shared dlReadVarint from doltlite_record.h */
 
 /* --------------------------------------------------------------------------
 ** Record field parsing and result setting (same as dolt_diff_table.c)
@@ -55,15 +44,12 @@ static void htParseRecord(const u8 *pData, int nData, HtRecInfo *ri){
   u64 hdrSize; int hdrBytes, off;
   memset(ri,0,sizeof(*ri));
   if(!pData||nData<1) return;
-  hdrBytes=htReadVarint(p,pEnd,&hdrSize); p+=hdrBytes;
+  hdrBytes=dlReadVarint(p,pEnd,&hdrSize); p+=hdrBytes;
   off=(int)hdrSize;
   while(p<pData+hdrSize && p<pEnd && ri->nField<HT_MAX_COLS){
-    u64 st; int stBytes=htReadVarint(p,pData+hdrSize,&st); p+=stBytes;
+    u64 st; int stBytes=dlReadVarint(p,pData+hdrSize,&st); p+=stBytes;
     ri->aType[ri->nField]=(int)st; ri->aOffset[ri->nField]=off;
-    if(st==0){}else if(st==1)off+=1;else if(st==2)off+=2;else if(st==3)off+=3;
-    else if(st==4)off+=4;else if(st==5)off+=6;else if(st==6)off+=8;else if(st==7)off+=8;
-    else if(st==8||st==9){}else if(st>=12&&(st&1)==0)off+=((int)st-12)/2;
-    else if(st>=13&&(st&1)==1)off+=((int)st-13)/2;
+    off += dlSerialTypeLen(st);
     ri->nField++;
   }
 }

@@ -20,6 +20,7 @@
 #include "prolly_three_way_diff.h"
 #include "prolly_mutmap.h"
 #include "prolly_mutate.h"
+#include "doltlite_record.h"
 #include <string.h>
 
 /* TableEntry struct — must match prolly_btree.c definition */
@@ -89,25 +90,9 @@ struct RowMergeCtx {
 **          field-level conflict.
 ** -------------------------------------------------------------------------- */
 
-/* Read a varint from a record. Returns bytes consumed. */
-static int mergeReadVarint(const u8 *p, const u8 *pEnd, u64 *pVal){
-  u64 v = 0; int i;
-  for(i=0; i<9 && p+i<pEnd; i++){
-    if(i<8){ v=(v<<7)|(p[i]&0x7f); if(!(p[i]&0x80)){*pVal=v; return i+1;} }
-    else{ v=(v<<8)|p[i]; *pVal=v; return 9; }
-  }
-  *pVal=v; return i?i:1;
-}
+/* Varint reader: use shared dlReadVarint from doltlite_record.h */
 
-/* Get the data size for a serial type. */
-static int serialTypeSize(u64 st){
-  if(st==0||st==8||st==9) return 0;
-  if(st>=1&&st<=6){ static const int s[]={0,1,2,3,4,6,8}; return s[st]; }
-  if(st==7) return 8;
-  if(st>=12&&(st&1)==0) return ((int)st-12)/2;
-  if(st>=13&&(st&1)==1) return ((int)st-13)/2;
-  return 0;
-}
+/* Serial type size: use shared dlSerialTypeLen from doltlite_record.h */
 
 /* Parse a record's fields into arrays of (serial_type, data_offset, data_len).
 ** Returns number of fields, or -1 on error. */
@@ -123,16 +108,16 @@ static int parseRecordFields(const u8 *pRec, int nRec,
 
   if(!pRec || nRec<1) { *ppFields=0; *pnFields=0; return 0; }
   pPos = pRec; pEnd = pRec + nRec;
-  hdrBytes = mergeReadVarint(pPos, pEnd, &hdrSize);
+  hdrBytes = dlReadVarint(pPos, pEnd, &hdrSize);
   pPos += hdrBytes;
   pHdrEnd = pRec + (int)hdrSize;
   bodyOff = (int)hdrSize;
 
   while(pPos < pHdrEnd && pPos < pEnd){
     u64 st; int stBytes, sz;
-    stBytes = mergeReadVarint(pPos, pHdrEnd, &st);
+    stBytes = dlReadVarint(pPos, pHdrEnd, &st);
     pPos += stBytes;
-    sz = serialTypeSize(st);
+    sz = dlSerialTypeLen(st);
 
     if(nFields >= nAlloc){
       nAlloc = nAlloc ? nAlloc*2 : 16;

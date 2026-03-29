@@ -474,17 +474,27 @@ void *sqlite3PagerGetExtra(DbPage *pPg){
   return 0;
 }
 
-void sqlite3PagerUnref(DbPage *pPg){ if(pPg) orig_sqlite3PagerUnref(pPg); }
-void sqlite3PagerUnrefNotNull(DbPage *pPg){ if(pPg) orig_sqlite3PagerUnrefNotNull(pPg); }
-void sqlite3PagerUnrefPageOne(DbPage *pPg){ if(pPg) orig_sqlite3PagerUnrefPageOne(pPg); }
-void sqlite3PagerRef(DbPage *pPg){ (void)pPg; }
+void sqlite3PagerUnref(DbPage *pPg){
+  if( pPg ) orig_sqlite3PagerUnref(pPg);
+}
+void sqlite3PagerUnrefNotNull(DbPage *pPg){
+  if( pPg ) orig_sqlite3PagerUnrefNotNull(pPg);
+}
+void sqlite3PagerUnrefPageOne(DbPage *pPg){
+  if( pPg ) orig_sqlite3PagerUnrefPageOne(pPg);
+}
+void sqlite3PagerRef(DbPage *pPg){
+  (void)pPg;
+}
 
 int sqlite3PagerWrite(DbPage *pPg){
   if( pPg ) return orig_sqlite3PagerWrite(pPg);
   return SQLITE_OK;
 }
 
-void sqlite3PagerDontWrite(DbPage *pPg){ (void)pPg; }
+void sqlite3PagerDontWrite(DbPage *pPg){
+  (void)pPg;
+}
 
 int sqlite3PagerPageRefcount(DbPage *pPg){
   if( pPg ) return orig_sqlite3PagerPageRefcount(pPg);
@@ -521,7 +531,9 @@ sqlite3_file *sqlite3PagerJrnlFile(Pager *pPager){
   return 0;
 }
 
-void sqlite3PagerClearCache(Pager *pPager){ (void)pPager; }
+void sqlite3PagerClearCache(Pager *pPager){
+  (void)pPager;
+}
 
 extern int orig_sqlite3PagerCommitPhaseOne(Pager*, const char*, int);
 extern int orig_sqlite3PagerCommitPhaseTwo(Pager*);
@@ -646,7 +658,9 @@ void *sqlite3PagerTempSpace(Pager *pPager){
 }
 
 void sqlite3PagerRekey(DbPage *pPg, Pgno pgno, u16 flags){
-  (void)pPg; (void)pgno; (void)flags;
+  (void)pPg;
+  (void)pgno;
+  (void)flags;
 }
 
 DbPage *sqlite3PagerLookup(Pager *pPager, Pgno pgno){
@@ -668,8 +682,14 @@ int sqlite3PagerCheckpoint(Pager *pPager, sqlite3 *db, int eMode, int *pnLog, in
   if( pnCkpt ) *pnCkpt = 0;
   return SQLITE_OK;
 }
-int sqlite3PagerWalSupported(Pager *pPager){ (void)pPager; return 0; }
-int sqlite3PagerWalCallback(Pager *pPager){ (void)pPager; return SQLITE_OK; }
+int sqlite3PagerWalSupported(Pager *pPager){
+  (void)pPager;
+  return 0;
+}
+int sqlite3PagerWalCallback(Pager *pPager){
+  (void)pPager;
+  return SQLITE_OK;
+}
 int sqlite3PagerOpenWal(Pager *pPager, int *pisOpen){
   if(!IS_SHIM(pPager)) return orig_sqlite3PagerOpenWal(pPager, pisOpen);
   (void)pPager;
@@ -697,8 +717,14 @@ sqlite3_file *sqlite3_database_file_object(const char *zName){
 
 /* Always provide these — test code links against libsqlite3.a which may
 ** not have been compiled with SQLITE_TEST, but testfixture needs them. */
-Pgno sqlite3PagerPagenumber(DbPage *pPg){ (void)pPg; return 0; }
-int sqlite3PagerIswriteable(DbPage *pPg){ (void)pPg; return 1; }
+Pgno sqlite3PagerPagenumber(DbPage *pPg){
+  (void)pPg;
+  return 0;
+}
+int sqlite3PagerIswriteable(DbPage *pPg){
+  (void)pPg;
+  return 1;
+}
 int *sqlite3PagerStats(Pager *pPager){
   
   static int aStats[11];
@@ -706,13 +732,17 @@ int *sqlite3PagerStats(Pager *pPager){
   memset(aStats, 0, sizeof(aStats));
   return aStats;
 }
-void sqlite3PagerRefdump(Pager *pPager){ (void)pPager; }
+void sqlite3PagerRefdump(Pager *pPager){
+  (void)pPager;
+}
 
 /* Undef macros from pager.h so we can define actual functions */
 #undef disable_simulated_io_errors
 #undef enable_simulated_io_errors
-void disable_simulated_io_errors(void){}
-void enable_simulated_io_errors(void){}
+void disable_simulated_io_errors(void){
+}
+void enable_simulated_io_errors(void){
+}
 
 /* -----------------------------------------------------------------------
 ** Backup API stubs (backup.c excluded from prolly build)

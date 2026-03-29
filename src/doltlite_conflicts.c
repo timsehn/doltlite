@@ -23,26 +23,7 @@
 extern ChunkStore *doltliteGetChunkStore(sqlite3 *db);
 extern int doltliteResolveTableName(sqlite3 *db, const char *zTable, Pgno *piTable);
 
-/* --------------------------------------------------------------------------
-** Helper: read a big-endian SQLite varint from a record blob.
-** Returns bytes consumed.
-** -------------------------------------------------------------------------- */
-static int cfReadVarint(const u8 *pRec, const u8 *pRecEnd, u64 *pVal){
-  u64 v = 0;
-  int i;
-  for(i=0; i<9 && pRec+i<pRecEnd; i++){
-    if( i<8 ){
-      v = (v << 7) | (pRec[i] & 0x7f);
-      if( (pRec[i] & 0x80)==0 ){ *pVal = v; return i+1; }
-    }else{
-      v = (v << 8) | pRec[i];
-      *pVal = v;
-      return 9;
-    }
-  }
-  *pVal = v;
-  return i ? i : 1;
-}
+/* Varint reader: use shared dlReadVarint from doltlite_record.h */
 
 /* Read a big-endian signed integer of nBytes bytes. */
 static i64 cfReadInt(const u8 *pRec, int nBytes){
@@ -58,10 +39,26 @@ static i64 cfReadInt(const u8 *pRec, int nBytes){
 }
 
 /* --------------------------------------------------------------------------
-** Build an INSERT OR REPLACE SQL statement from column names and a decoded
-** SQLite record blob. The record header position (pRec) should point past
-** the PK placeholder field. pBody should point to the first non-PK data
-** byte. Returns the SQL string (caller must sqlite3_free), or NULL on OOM.
+** Build an INSERT OR REPLACE SQL statement for conflict resolution.
+**
+** Constructs a complete INSERT OR REPLACE statement from a raw SQLite
+** record blob, decoding each field according to its serial type (integers,
+** floats, text with %Q quoting, blobs as hex literals). This is used
+** during --theirs conflict resolution to apply the remote side's row
+** values into the local table. The rowid is passed separately because
+** INTKEY tables store it outside the record blob.
+**
+** Parameters:
+**   zTable   - target table name
+**   intKey   - rowid value for the row
+**   azCol    - array of column names (from PRAGMA table_info)
+**   nCol     - number of columns
+**   pRec     - current position in the record header (serial types)
+**   pRecEnd  - end of the record blob
+**   pHdrEnd  - end of the header section
+**   pBody    - start of the data section
+**
+** Returns the SQL string (caller must sqlite3_free), or NULL on OOM.
 ** -------------------------------------------------------------------------- */
 static char *buildInsertSql(
   const char *zTable,
@@ -83,7 +80,7 @@ static char *buildInsertSql(
 
   while( pRec < pHdrEnd && pRec < pRecEnd && colIdx < nCol ){
     u64 st;
-    int stBytes = cfReadVarint(pRec, pHdrEnd, &st);
+    int stBytes = dlReadVarint(pRec, pHdrEnd, &st);
     pRec += stBytes;
 
     /* OOM check — if a previous sqlite3_mprintf failed, bail out */
@@ -228,7 +225,7 @@ static int applyTheirRecord(
   /* Parse the record header to get serial types */
   pPos = pRec;
   pRecEnd = pRec + nRec;
-  hdrBytes = cfReadVarint(pPos, pRecEnd, &hdrSize);
+  hdrBytes = dlReadVarint(pPos, pRecEnd, &hdrSize);
   pPos += hdrBytes;
   pHdrEnd = pRec + (int)hdrSize;
   pBody = pRec + (int)hdrSize;
@@ -238,7 +235,7 @@ static int applyTheirRecord(
   ** column names must be aligned by skipping this placeholder. */
   if( pPos < pHdrEnd ){
     u64 stSkip;
-    int skipBytes = cfReadVarint(pPos, pHdrEnd, &stSkip);
+    int skipBytes = dlReadVarint(pPos, pHdrEnd, &stSkip);
     pPos += skipBytes;
     /* Advance pBody past the PK field's data (usually 0 bytes for NULL) */
     if( stSkip==0 || stSkip==8 || stSkip==9 ) {}

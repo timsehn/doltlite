@@ -57,6 +57,22 @@
 #include <string.h>
 #include <assert.h>
 
+/* SQLite serial type constants */
+#define SERIAL_TYPE_NULL      0
+#define SERIAL_TYPE_INT8      1
+#define SERIAL_TYPE_INT16     2
+#define SERIAL_TYPE_INT24     3
+#define SERIAL_TYPE_INT32     4
+#define SERIAL_TYPE_INT48     5
+#define SERIAL_TYPE_INT64     6
+#define SERIAL_TYPE_FLOAT64   7
+#define SERIAL_TYPE_ZERO      8   /* Integer constant 0 (no payload) */
+#define SERIAL_TYPE_ONE       9   /* Integer constant 1 (no payload) */
+#define SERIAL_TYPE_TEXT_BASE 13  /* Text: serial_type = len*2 + 13 */
+#define SERIAL_TYPE_BLOB_BASE 12  /* Blob: serial_type = len*2 + 12 */
+#define MAX_RECORD_FIELDS     64  /* Max fields in stack-allocated arrays */
+#define MAX_ONEBYTE_HEADER   126  /* Max header size for single-byte varint */
+
 /* Forward declarations */
 static void registerDoltiteFunctions(sqlite3 *db);
 void doltliteGetSessionHead(sqlite3 *db, ProllyHash *pHead);
@@ -2368,51 +2384,65 @@ int sqlite3BtreeTableMoveto(
 ** to sort key for prolly tree navigation.
 */
 /*
-** Compute the serial type for a Mem value (same logic as sqlite3VdbeSerialType).
-** Returns the serial type and sets *pLen to the data length.
+** Compute the SQLite serial type for an in-memory value (Mem).
+**
+** The serial type encodes both the data type and its storage size in the
+** record format. NULL=0, integers 1-6 use 1/2/3/4/6/8 bytes, float=7
+** uses 8 bytes, constants 0 and 1 use types 8/9 with no payload,
+** text = len*2+13, blob = len*2+12.
+**
+** Returns the serial type code and sets *pLen to the payload byte count.
 */
 static u32 btreeSerialType(Mem *pMem, u32 *pLen){
   int flags = pMem->flags;
-  if( flags & MEM_Null ){ *pLen = 0; return 0; }
+  if( flags & MEM_Null ){ *pLen = 0; return SERIAL_TYPE_NULL; }
   if( flags & MEM_Int ){
     i64 v = pMem->u.i;
-    if( v==0 ){ *pLen = 0; return 8; }
-    if( v==1 ){ *pLen = 0; return 9; }
-    if( v>=-128 && v<=127 ){ *pLen = 1; return 1; }
-    if( v>=-32768 && v<=32767 ){ *pLen = 2; return 2; }
-    if( v>=-8388608 && v<=8388607 ){ *pLen = 3; return 3; }
-    if( v>=-2147483648LL && v<=2147483647LL ){ *pLen = 4; return 4; }
-    if( v>=-140737488355328LL && v<=140737488355327LL ){ *pLen = 6; return 5; }
-    *pLen = 8; return 6;
+    if( v==0 ){ *pLen = 0; return SERIAL_TYPE_ZERO; }
+    if( v==1 ){ *pLen = 0; return SERIAL_TYPE_ONE; }
+    if( v>=-128 && v<=127 ){ *pLen = 1; return SERIAL_TYPE_INT8; }
+    if( v>=-32768 && v<=32767 ){ *pLen = 2; return SERIAL_TYPE_INT16; }
+    if( v>=-8388608 && v<=8388607 ){ *pLen = 3; return SERIAL_TYPE_INT24; }
+    if( v>=-2147483648LL && v<=2147483647LL ){ *pLen = 4; return SERIAL_TYPE_INT32; }
+    if( v>=-140737488355328LL && v<=140737488355327LL ){ *pLen = 6; return SERIAL_TYPE_INT48; }
+    *pLen = 8; return SERIAL_TYPE_INT64;
   }
-  if( flags & MEM_Real ){ *pLen = 8; return 7; }
+  if( flags & MEM_Real ){ *pLen = 8; return SERIAL_TYPE_FLOAT64; }
   if( flags & MEM_Str ){
     u32 n = (u32)pMem->n;
     *pLen = n;
-    return n*2 + 13;
+    return n*2 + SERIAL_TYPE_TEXT_BASE;
   }
   if( flags & MEM_Blob ){
     u32 n = (u32)pMem->n;
     *pLen = n;
-    return n*2 + 12;
+    return n*2 + SERIAL_TYPE_BLOB_BASE;
   }
-  *pLen = 0; return 0;
+  *pLen = 0; return SERIAL_TYPE_NULL;
 }
 
 /*
-** Serialize an UnpackedRecord to a standard SQLite record blob.
+** Serialize an UnpackedRecord into a standard SQLite record blob.
+**
+** The record format is: varint(header_size) followed by serial type varints
+** for each field, then the concatenated field data. This is the same binary
+** format used by SQLite's OP_MakeRecord. The resulting blob can be compared
+** with sqlite3VdbeRecordCompare() or stored as a BLOBKEY table value.
+**
+** On success, *ppOut is set to a sqlite3_malloc'd buffer (caller frees)
+** and *pnOut to its length. Returns SQLITE_OK or SQLITE_NOMEM.
 */
 static int serializeUnpackedRecord(UnpackedRecord *pRec, u8 **ppOut, int *pnOut){
   int nField = pRec->nField;
   Mem *aMem = pRec->aMem;
   u32 nData = 0;
-  u32 aType[64];
-  u32 aLen[64];
+  u32 aType[MAX_RECORD_FIELDS];
+  u32 aLen[MAX_RECORD_FIELDS];
   int i;
   u8 *pOut;
   int nHdr, nTotal;
 
-  if( nField > 64 ) nField = 64;
+  if( nField > MAX_RECORD_FIELDS ) nField = MAX_RECORD_FIELDS;
 
   for(i=0; i<nField; i++){
     aType[i] = btreeSerialType(&aMem[i], &aLen[i]);
@@ -2421,7 +2451,7 @@ static int serializeUnpackedRecord(UnpackedRecord *pRec, u8 **ppOut, int *pnOut)
 
   nHdr = 1;
   for(i=0; i<nField; i++) nHdr += sqlite3VarintLen(aType[i]);
-  if( nHdr > 126 ) nHdr++;
+  if( nHdr > MAX_ONEBYTE_HEADER ) nHdr++;
 
   nTotal = nHdr + (int)nData;
   pOut = (u8*)sqlite3_malloc(nTotal);
@@ -2439,9 +2469,9 @@ static int serializeUnpackedRecord(UnpackedRecord *pRec, u8 **ppOut, int *pnOut)
     for(i=0; i<nField; i++){
       Mem *p = &aMem[i];
       u32 st = aType[i];
-      if( st==0 || st==8 || st==9 ){
+      if( st==SERIAL_TYPE_NULL || st==SERIAL_TYPE_ZERO || st==SERIAL_TYPE_ONE ){
         /* no data */
-      }else if( st<=6 ){
+      }else if( st<=SERIAL_TYPE_INT64 ){
         i64 v = p->u.i;
         int nByte = (int)aLen[i];
         int j;
@@ -2450,7 +2480,7 @@ static int serializeUnpackedRecord(UnpackedRecord *pRec, u8 **ppOut, int *pnOut)
           v >>= 8;
         }
         off += nByte;
-      }else if( st==7 ){
+      }else if( st==SERIAL_TYPE_FLOAT64 ){
         u64 floatBits;
         memcpy(&floatBits, &p->u.r, 8);
         int j;
@@ -2556,9 +2586,9 @@ int sqlite3BtreeIndexMoveto(
           int mid = lo + (hi - lo) / 2;
           const u8 *pSK; int nSK;
           prollyNodeKey(&pLeaf->node, mid, &pSK, &nSK);
-          int n = nSK < nSortKey ? nSK : nSortKey;
-          int c = memcmp(pSK, pSortKey, n);
-          if( c < 0 || (c==0 && nSK < nSortKey) ){
+          int cmpLen = nSK < nSortKey ? nSK : nSortKey;
+          int keyCmp = memcmp(pSK, pSortKey, cmpLen);
+          if( keyCmp < 0 || (keyCmp==0 && nSK < nSortKey) ){
             lo = mid + 1;
           }else{
             hi = mid;
@@ -2575,9 +2605,9 @@ int sqlite3BtreeIndexMoveto(
           ** first one greater than the search key. Capture as fallback
           ** for range queries (>, >=) and stop scanning. */
           {
-            int n = nSK < nSortKey ? nSK : nSortKey;
-            int pc = memcmp(pSK, pSortKey, n);
-            if( pc > 0 ){
+            int cmpLen = nSK < nSortKey ? nSK : nSortKey;
+            int prefixCmp = memcmp(pSK, pSortKey, cmpLen);
+            if( prefixCmp > 0 ){
               if( bestIdx < 0 ){
                 int isDeleted = 0;
                 if( pCur->pMutMap && !prollyMutMapIsEmpty(pCur->pMutMap) ){
@@ -2599,9 +2629,9 @@ int sqlite3BtreeIndexMoveto(
           const u8 *pVal; int nVal;
           prollyNodeValue(&pLeaf->node, i, &pVal, &nVal);
           pIdxKey->eqSeen = 0;
-          int c = sqlite3VdbeRecordCompare(nVal, pVal, pIdxKey);
+          int recCmp = sqlite3VdbeRecordCompare(nVal, pVal, pIdxKey);
 
-          if( c==0 || pIdxKey->eqSeen ){
+          if( recCmp==0 || pIdxKey->eqSeen ){
             if( pCur->pMutMap && !prollyMutMapIsEmpty(pCur->pMutMap) ){
               ProllyMutMapEntry *mmE = prollyMutMapFind(
                   pCur->pMutMap, pSK, nSK, 0);
@@ -2610,11 +2640,11 @@ int sqlite3BtreeIndexMoveto(
               }
             }
             bestIdx = i;
-            bestCmp = c;
+            bestCmp = recCmp;
             treeFound = 1;
-            treeCmp = c;
+            treeCmp = recCmp;
             break;
-          } else if( c > 0 ){
+          } else if( recCmp > 0 ){
             if( pCur->pMutMap && !prollyMutMapIsEmpty(pCur->pMutMap) ){
               ProllyMutMapEntry *mmE = prollyMutMapFind(
                   pCur->pMutMap, pSK, nSK, 0);
@@ -2624,7 +2654,7 @@ int sqlite3BtreeIndexMoveto(
             }
             if( bestIdx < 0 ){
               bestIdx = i;
-              bestCmp = c;
+              bestCmp = recCmp;
             }
           }
         }
