@@ -2706,14 +2706,25 @@ int sqlite3BtreeIndexMoveto(
       ProllyMutMapEntry *mutE = prollyMutMapFind(
           pCur->pMutMap, pSortKey, nSortKey, 0);
       if( mutE && mutE->op==PROLLY_EDIT_INSERT ){
-        /* MutMap value = original SQLite record */
-        pIdxKey->eqSeen = 0;
-        mutCmp = sqlite3VdbeRecordCompare(mutE->nVal, mutE->pVal, pIdxKey);
-        if( mutCmp==0 || pIdxKey->eqSeen ){
-          mutKey = mutE->pVal;
-          mutNKey = mutE->nVal;
-          mutFound = 1;
+        /* MutMap value is the original SQLite record, or empty for
+        ** BLOBKEY entries (reconstructed from sort key via #216). */
+        const u8 *pMutVal = mutE->pVal;
+        int nMutVal = mutE->nVal;
+        u8 *pRecon = 0;
+        if( nMutVal==0 ){
+          recordFromSortKey(mutE->pKey, mutE->nKey, &pRecon, &nMutVal);
+          pMutVal = pRecon;
         }
+        if( pMutVal ){
+          pIdxKey->eqSeen = 0;
+          mutCmp = sqlite3VdbeRecordCompare(nMutVal, pMutVal, pIdxKey);
+          if( mutCmp==0 || pIdxKey->eqSeen ){
+            mutKey = pMutVal;
+            mutNKey = nMutVal;
+            mutFound = 1;
+          }
+        }
+        if( !mutFound ) sqlite3_free(pRecon);
       }
     }
     sqlite3_free(pSerKey);
@@ -2721,15 +2732,23 @@ int sqlite3BtreeIndexMoveto(
 
     /* ---- Pick best result ---- */
     if( mutFound && (!treeFound || treeCmp!=0) ){
-      /* MutMap has exact match — cache original SQLite record as payload */
+      /* MutMap has exact match — cache reconstructed or original record */
       if( pCur->cachedPayloadOwned && pCur->pCachedPayload ){
         sqlite3_free(pCur->pCachedPayload);
       }
-      pCur->pCachedPayload = sqlite3_malloc(mutNKey);
-      if( pCur->pCachedPayload ){
-        memcpy(pCur->pCachedPayload, mutKey, mutNKey);
-        pCur->nCachedPayload = mutNKey;
+      if( mutNKey > 0 ){
+        /* Check if mutKey is already an owned buffer (from recordFromSortKey) */
+        u8 *pCopy = sqlite3_malloc(mutNKey);
+        if( pCopy ){
+          memcpy(pCopy, mutKey, mutNKey);
+          pCur->pCachedPayload = pCopy;
+          pCur->nCachedPayload = mutNKey;
+        } else {
+          pCur->nCachedPayload = 0;
+          pCur->pCachedPayload = 0;
+        }
       } else {
+        pCur->pCachedPayload = 0;
         pCur->nCachedPayload = 0;
       }
       pCur->cachedPayloadOwned = 1;
@@ -2958,20 +2977,17 @@ int sqlite3BtreeInsert(
 
   /* Defer flush for persistent (non-ephemeral) tables, including newly
   ** created tables and indexes in the current transaction.
-  ** Ephemeral tables (temp database) need immediate writes because CTEs
-  ** and window functions read back what they just wrote.
-  ** We detect persistent tables by checking the MAIN database's aTables
-  ** (db->aDb[0].pBt), not the cursor's btree (which may be temp). */
+  ** Ephemeral tables (temp database) flush immediately because their
+  ** VDBE cursor patterns (insert+scan on same cursor without Rewind)
+  ** don't always go through flushIfNeeded before reading. */
   {
     int canDefer = 0;
     if( pCur->pgnoRoot > 1 && pCur->pBt->db ){
       Btree *pMain = pCur->pBt->db->aDb[0].pBt;
       if( pMain && pMain == pCur->pBtree ){
-        /* Cursor is on the main database — check aTables */
         struct TableEntry *pTE2 = findTable(pMain, pCur->pgnoRoot);
         if( pTE2 ) canDefer = 1;
       }
-      /* If cursor is on a temp/ephemeral database, canDefer stays 0 */
     }
     if( canDefer ){
       if( (flags & BTREE_SAVEPOSITION) && pCur->curIntKey ){
