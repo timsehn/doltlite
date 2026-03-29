@@ -133,24 +133,14 @@ static void resultPkFromRecord(
 
   p = pData; pEnd = pData + nData;
   /* Read header size varint */
-  { u64 v=0; int i;
-    for(i=0; i<9 && p+i<pEnd; i++){
-      if(i<8){ v=(v<<7)|(p[i]&0x7f); if(!(p[i]&0x80)){hdrSize=v; hdrBytes=i+1; break;} }
-      else{ v=(v<<8)|p[i]; hdrSize=v; hdrBytes=9; }
-    }
-  }
+  hdrBytes = dlReadVarint(p, pEnd, &hdrSize);
   p += hdrBytes;
   off = (int)hdrSize;
 
   /* Walk serial types to find the PK field */
   while( p < pData+hdrSize && p < pEnd ){
     u64 st; int stBytes;
-    { u64 v=0; int i;
-      for(i=0; i<9 && p+i<pEnd; i++){
-        if(i<8){ v=(v<<7)|(p[i]&0x7f); if(!(p[i]&0x80)){st=v; stBytes=i+1; break;} }
-        else{ v=(v<<8)|p[i]; st=v; stBytes=9; }
-      }
-    }
+    stBytes = dlReadVarint(p, pData+hdrSize, &st);
     p += stBytes;
 
     if( fieldIdx==pkFieldIdx ){
@@ -179,11 +169,7 @@ static void resultPkFromRecord(
     }
 
     /* Advance offset past this field's data */
-    if( st==0||st==8||st==9 ) {}
-    else if( st>=1&&st<=6 ){ static const int s[]={0,1,2,3,4,6,8}; off+=s[st]; }
-    else if( st==7 ) off+=8;
-    else if( st>=12&&(st&1)==0 ) off+=((int)st-12)/2;
-    else if( st>=13&&(st&1)==1 ) off+=((int)st-13)/2;
+    off += dlSerialTypeLen(st);
     fieldIdx++;
   }
   sqlite3_result_null(ctx);

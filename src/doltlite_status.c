@@ -53,7 +53,11 @@ static const char *statusSchema =
   "CREATE TABLE x(table_name TEXT, staged INTEGER, status TEXT)";
 
 static struct TableEntry *findInCatalog(struct TableEntry *a, int n, Pgno iTable){
-  int i; for(i=0;i<n;i++) if(a[i].iTable==iTable) return &a[i]; return 0;
+  int i;
+  for(i=0; i<n; i++){
+    if( a[i].iTable==iTable ) return &a[i];
+  }
+  return 0;
 }
 
 static void addRow(DoltliteStatusCursor *pCur, const char *zName,
@@ -134,8 +138,13 @@ static int statusOpen(sqlite3_vtab *v, sqlite3_vtab_cursor **pp){
 }
 static int statusClose(sqlite3_vtab_cursor *p){
   DoltliteStatusCursor *c=(DoltliteStatusCursor*)p;
-  int i;for(i=0;i<c->nRows;i++)sqlite3_free(c->aRows[i].zName);
-  sqlite3_free(c->aRows);sqlite3_free(c);return SQLITE_OK;
+  int i;
+  for(i=0; i<c->nRows; i++){
+    sqlite3_free(c->aRows[i].zName);
+  }
+  sqlite3_free(c->aRows);
+  sqlite3_free(c);
+  return SQLITE_OK;
 }
 
 static int statusFilter(sqlite3_vtab_cursor *pCursor,
@@ -149,8 +158,16 @@ static int statusFilter(sqlite3_vtab_cursor *pCursor,
   int nHead=0,nStaged=0,nWorking=0,rc;
   (void)idxNum;(void)idxStr;(void)argc;(void)argv;
 
-  {int i;for(i=0;i<pCur->nRows;i++)sqlite3_free(pCur->aRows[i].zName);}
-  sqlite3_free(pCur->aRows);pCur->aRows=0;pCur->nRows=0;pCur->iRow=0;
+  {
+    int i;
+    for(i=0; i<pCur->nRows; i++){
+      sqlite3_free(pCur->aRows[i].zName);
+    }
+  }
+  sqlite3_free(pCur->aRows);
+  pCur->aRows = 0;
+  pCur->nRows = 0;
+  pCur->iRow = 0;
   if(!cs) return SQLITE_OK;
 
   rc=doltliteGetHeadCatalogHash(db,&headCatHash);
@@ -181,8 +198,13 @@ static int statusFilter(sqlite3_vtab_cursor *pCursor,
   return SQLITE_OK;
 }
 
-static int statusNext(sqlite3_vtab_cursor *p){((DoltliteStatusCursor*)p)->iRow++;return SQLITE_OK;}
-static int statusEof(sqlite3_vtab_cursor *p){return((DoltliteStatusCursor*)p)->iRow>=((DoltliteStatusCursor*)p)->nRows;}
+static int statusNext(sqlite3_vtab_cursor *p){
+  ((DoltliteStatusCursor*)p)->iRow++;
+  return SQLITE_OK;
+}
+static int statusEof(sqlite3_vtab_cursor *p){
+  return ((DoltliteStatusCursor*)p)->iRow >= ((DoltliteStatusCursor*)p)->nRows;
+}
 static int statusColumn(sqlite3_vtab_cursor *p,sqlite3_context *ctx,int c){
   DoltliteStatusCursor *pCur=(DoltliteStatusCursor*)p;
   StatusRow *r;
@@ -195,7 +217,10 @@ static int statusColumn(sqlite3_vtab_cursor *p,sqlite3_context *ctx,int c){
   }
   return SQLITE_OK;
 }
-static int statusRowid(sqlite3_vtab_cursor *p,sqlite3_int64 *r){*r=((DoltliteStatusCursor*)p)->iRow;return SQLITE_OK;}
+static int statusRowid(sqlite3_vtab_cursor *p, sqlite3_int64 *r){
+  *r = ((DoltliteStatusCursor*)p)->iRow;
+  return SQLITE_OK;
+}
 static int statusBestIndex(sqlite3_vtab *v,sqlite3_index_info *p){(void)v;p->estimatedCost=100.0;return SQLITE_OK;}
 
 static sqlite3_module doltliteStatusModule = {
