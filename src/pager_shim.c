@@ -196,7 +196,7 @@ PagerShim *pagerShimCreate(
   }
   pShim->pFd          = pFd;
   pShim->pVfs         = pVfs;
-  pShim->journalMode  = PAGER_JOURNALMODE_DELETE;
+  pShim->journalMode  = PAGER_JOURNALMODE_WAL;
   pShim->eLock        = 0;
   pShim->eState       = 0;
   pShim->noSync       = 0;
@@ -683,8 +683,8 @@ int sqlite3PagerCheckpoint(Pager *pPager, sqlite3 *db, int eMode, int *pnLog, in
   return SQLITE_OK;
 }
 int sqlite3PagerWalSupported(Pager *pPager){
-  (void)pPager;
-  return 0;
+  if( !IS_SHIM(pPager) ) return orig_sqlite3PagerWalSupported(pPager);
+  return 1;  /* Content-addressed chunk store provides MVCC natively */
 }
 int sqlite3PagerWalCallback(Pager *pPager){
   (void)pPager;
@@ -692,8 +692,8 @@ int sqlite3PagerWalCallback(Pager *pPager){
 }
 int sqlite3PagerOpenWal(Pager *pPager, int *pisOpen){
   if(!IS_SHIM(pPager)) return orig_sqlite3PagerOpenWal(pPager, pisOpen);
-  (void)pPager;
-  if( pisOpen ) *pisOpen = 0;
+  SHIM(pPager)->journalMode = PAGER_JOURNALMODE_WAL;
+  if( pisOpen ) *pisOpen = 1;  /* WAL is always "open" for chunk store */
   return SQLITE_OK;
 }
 int sqlite3PagerCloseWal(Pager *pPager, sqlite3 *db){
