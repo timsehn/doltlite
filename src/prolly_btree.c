@@ -272,6 +272,7 @@ struct Btree {
 
   struct SavepointTableState {
     struct TableEntry *aTables;
+    int *aPendingCount;    /* nEntries for each table's pPending at save time */
     int nTables;
     Pgno iNextTable;
   } *aSavepointTables;
@@ -880,18 +881,16 @@ static int restoreCursorPosition(BtCursor *pCur, int *pDifferentRow){
 /*
 ** Push the current state onto the savepoint stack.
 */
-/* Free a savepoint's aTables including any cloned pPending maps. */
+/* Free a savepoint's table snapshot.  pPending pointers in the snapshot
+** are always NULL (we don't clone MutMaps), so no MutMap freeing needed. */
 static void freeSavepointTables(struct SavepointTableState *pState){
   if( pState->aTables ){
-    int k;
-    for(k=0; k<pState->nTables; k++){
-      if( pState->aTables[k].pPending ){
-        prollyMutMapFree((ProllyMutMap*)pState->aTables[k].pPending);
-        sqlite3_free(pState->aTables[k].pPending);
-      }
-    }
     sqlite3_free(pState->aTables);
     pState->aTables = 0;
+  }
+  if( pState->aPendingCount ){
+    sqlite3_free(pState->aPendingCount);
+    pState->aPendingCount = 0;
   }
 }
 
@@ -899,29 +898,12 @@ static int pushSavepoint(Btree *pBtree){
   struct SavepointTableState *pState;
   int rc;
 
-  /* Flush cursor-level MutMaps. For table-level pPending: if small
-  ** (<=256 edits), clone into snapshot to avoid tree rebuild. If large,
-  ** flush to tree (via flushDeferredEdits) to prevent clone accumulation. */
+  /* Flush cursor-level MutMaps so all pending edits land in table-level
+  ** pPending.  This is cheap (MutMap merge, no tree rebuild). */
   {
     BtCursor *p;
-    int needFullFlush = 0;
     for(p = pBtree->pBt->pCursor; p; p = p->pNext){
       rc = flushIfNeeded(p);
-      if( rc!=SQLITE_OK ) return rc;
-    }
-    /* Check if any pPending is too large to clone efficiently */
-    {
-      int i;
-      for(i=0; i<pBtree->nTables; i++){
-        ProllyMutMap *pMap = (ProllyMutMap*)pBtree->aTables[i].pPending;
-        if( pMap && prollyMutMapCount(pMap) > 256 ){
-          needFullFlush = 1;
-          break;
-        }
-      }
-    }
-    if( needFullFlush ){
-      rc = flushDeferredEdits(pBtree->pBt);
       if( rc!=SQLITE_OK ) return rc;
     }
   }
@@ -942,25 +924,32 @@ static int pushSavepoint(Btree *pBtree){
 
   pBtree->aSavepoint[pBtree->nSavepoint] = pBtree->root;
 
-  /* Also snapshot the table registry */
+  /* Snapshot table roots + pPending high-water marks.  No MutMap cloning.
+  ** On rollback, we restore the root hashes and truncate each pPending
+  ** to its saved size, discarding only post-savepoint edits. */
   pState = &pBtree->aSavepointTables[pBtree->nSavepoint];
   pState->aTables = 0;
+  pState->aPendingCount = 0;
   pState->nTables = 0;
   pState->iNextTable = pBtree->iNextTable;
   if( pBtree->nTables > 0 ){
     pState->aTables = sqlite3_malloc(pBtree->nTables * (int)sizeof(struct TableEntry));
     if( !pState->aTables ) return SQLITE_NOMEM;
+    pState->aPendingCount = sqlite3_malloc(pBtree->nTables * (int)sizeof(int));
+    if( !pState->aPendingCount ){
+      sqlite3_free(pState->aTables);
+      pState->aTables = 0;
+      return SQLITE_NOMEM;
+    }
     memcpy(pState->aTables, pBtree->aTables,
            pBtree->nTables * sizeof(struct TableEntry));
     pState->nTables = pBtree->nTables;
-    /* Clone small pPending into snapshot; clear if already flushed. */
     {
       int k;
       for(k=0; k<pState->nTables; k++){
-        if( pState->aTables[k].pPending ){
-          pState->aTables[k].pPending =
-              prollyMutMapClone((ProllyMutMap*)pState->aTables[k].pPending);
-        }
+        ProllyMutMap *pMap = (ProllyMutMap*)pState->aTables[k].pPending;
+        pState->aPendingCount[k] = pMap ? pMap->nEntries : 0;
+        pState->aTables[k].pPending = 0;  /* Don't own live MutMap */
       }
     }
   }
@@ -1739,25 +1728,45 @@ int sqlite3BtreeSavepoint(Btree *p, int op, int iSavepoint){
      && p->aSavepointTables ){
       struct SavepointTableState *pState = &p->aSavepointTables[iSavepoint];
       p->root = p->aSavepoint[iSavepoint];
-      /* Restore table registry */
+      /* Restore table registry: restore root hashes from snapshot and
+      ** truncate each pPending to its pre-savepoint size.  Post-savepoint
+      ** edits in pPending are freed; pre-savepoint edits are preserved. */
       if( pState->aTables ){
-        /* Free pPending maps on current entries — these hold post-savepoint
-        ** edits that are being discarded by the rollback. */
+        /* Restore roots and truncate pPending for tables that existed
+        ** at savepoint time.  Tables added after the savepoint are removed. */
         {
           int k;
-          for(k=0; k<p->nTables; k++){
+          for(k=0; k<pState->nTables && k<p->nTables; k++){
+            p->aTables[k].root = pState->aTables[k].root;
+            /* Truncate pPending to saved size, freeing post-savepoint entries */
+            ProllyMutMap *pMap = (ProllyMutMap*)p->aTables[k].pPending;
+            if( pMap ){
+              int savedCount = pState->aPendingCount[k];
+              while( pMap->nEntries > savedCount ){
+                pMap->nEntries--;
+                ProllyMutMapEntry *e = &pMap->aEntries[pMap->nEntries];
+                sqlite3_free(e->pKey); e->pKey = 0;
+                sqlite3_free(e->pVal); e->pVal = 0;
+              }
+            }
+          }
+          /* Free pPending on tables added after the savepoint */
+          for(k=pState->nTables; k<p->nTables; k++){
             if( p->aTables[k].pPending ){
               prollyMutMapFree((ProllyMutMap*)p->aTables[k].pPending);
               sqlite3_free(p->aTables[k].pPending);
             }
           }
         }
-        sqlite3_free(p->aTables);
-        p->aTables = pState->aTables;
+        /* Restore table count */
         p->nTables = pState->nTables;
-        p->nTablesAlloc = pState->nTables;
+        p->nTablesAlloc = p->nTables;
         p->iNextTable = pState->iNextTable;
-        pState->aTables = 0; /* Ownership transferred */
+        /* Free the snapshot aTables (we restored roots in-place) */
+        sqlite3_free(pState->aTables);
+        sqlite3_free(pState->aPendingCount);
+        pState->aTables = 0;
+        pState->aPendingCount = 0;
       }
       /* Free savepoints above this one */
       {
