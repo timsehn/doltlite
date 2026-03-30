@@ -1,0 +1,35 @@
+name: SQL Logic Test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  sqllogictest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y build-essential zlib1g-dev fossil
+
+    - name: Build doltlite and sqlite3
+      run: |
+        mkdir -p build && cd build
+        ../configure
+        make doltlite
+        make sqlite3
+
+    - name: Clone sqllogictest (official SQLite Fossil repo)
+      run: |
+        fossil clone https://www.sqlite.org/sqllogictest/ /tmp/sqllogictest.fossil
+        mkdir -p /tmp/sqllogictest && cd /tmp/sqllogictest
+        fossil open /tmp/sqllogictest.fossil
+
+    - name: Run sqllogictest
+      run: |
+        bash test/run_sqllogictest.sh build/doltlite build/sqlite3 /tmp/sqllogictest/test
