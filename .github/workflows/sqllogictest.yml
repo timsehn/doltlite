@@ -38,7 +38,7 @@ jobs:
           -DSQLITE_OMIT_LOAD_EXTENSION -c md5.c
         gcc -g -O2 -DSQLITE_NO_SYNC=1 -DSQLITE_THREADSAFE=0 \
           -DSQLITE_OMIT_LOAD_EXTENSION -c sqlite3.c
-        gcc -g -O2 -o sqllogictest-stock sqllogictest.c md5.o sqlite3.o -lpthread -lm
+        gcc -g -O2 -o sqllogictest-stock sqllogictest.c md5.o sqlite3.o -lpthread -lm -lodbc
 
     - name: Build sqllogictest C runner with doltlite
       run: |
@@ -48,7 +48,7 @@ jobs:
         cp $GITHUB_WORKSPACE/build/sqlite3.h sqlite3.h
         gcc -g -O2 -DSQLITE_NO_SYNC=1 -DSQLITE_THREADSAFE=0 \
           -DSQLITE_OMIT_LOAD_EXTENSION -c sqlite3.c
-        gcc -g -O2 -o sqllogictest-doltlite sqllogictest.c md5.o sqlite3.o -lpthread -lm -lz
+        gcc -g -O2 -o sqllogictest-doltlite sqllogictest.c md5.o sqlite3.o -lpthread -lm -lz -lodbc
 
     - name: Run full sqllogictest suite
       run: |
