@@ -2534,6 +2534,7 @@ int sqlite3BtreeCursorSize(void){
 
 void sqlite3BtreeCursorZero(BtCursor *p){
   memset(p, 0, sizeof(BtCursor));
+  p->pCurOps = &prollyCursorOps;
 }
 
 static int prollyBtreeCursor(
@@ -2661,6 +2662,7 @@ static int prollyBtCursorCursorHasMoved(BtCursor *pCur){
 }
 int sqlite3BtreeCursorHasMoved(BtCursor *pCur){
   if( !pCur ) return 0;
+  if( !pCur->pCurOps ) return (pCur->eState!=CURSOR_VALID);
   return pCur->pCurOps->xCursorHasMoved(pCur);
 }
 
