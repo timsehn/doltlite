@@ -112,5 +112,9 @@ if [ "$sq_total_pass" -gt 0 ]; then
 fi
 echo "============================================"
 
-# Informational — don't fail CI
-exit 0
+# Fail if doltlite has any failures or errors that stock SQLite doesn't
+if [ "$dl_total_fail" -gt 0 ] || [ "$dl_total_errors" -gt 0 ]; then
+  echo ""
+  echo "FAILED: doltlite had $dl_total_fail failures and $dl_total_errors errors"
+  exit 1
+fi
